@@ -1,4 +1,4 @@
-const CACHE_NAME = "multi-model-chat-v1";
+const CACHE_NAME = "multi-llama-chat-v1";
 const APP_SHELL = ["/", "/manifest.webmanifest", "/placeholder.svg", "/placeholder-logo.svg"];
 
 self.addEventListener("install", (event) => {

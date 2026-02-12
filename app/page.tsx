@@ -5,6 +5,7 @@ import React from "react";
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { Switch } from "@/components/ui/switch";
 import {
   Tooltip,
   TooltipContent,
@@ -37,6 +38,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { useTheme } from "next-themes";
+import { toast } from "sonner";
 import {
   Send,
   Loader2,
@@ -49,6 +51,10 @@ import {
   Sun,
   Moon,
   AlertTriangle,
+  Paperclip,
+  X,
+  FileText,
+  Image as ImageIcon,
 } from "lucide-react";
 import ModelChat from "@/components/ModelChat";
 
@@ -66,11 +72,24 @@ interface ModelChatData {
 interface UserSettings {
   ollamaBaseUrl: string;
   persistDataLocally: boolean;
+  enableRoles: boolean;
+  allowSameModelMultiChat: boolean;
 }
 
 interface PersistedChatState {
   selectedModels: string[];
   modelChats: Record<string, ModelChatData>;
+  modelRoles?: Record<string, string>;
+  roleLibrary?: string[];
+}
+
+interface Attachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  kind: "image" | "text";
+  textContent?: string;
+  base64Content?: string;
 }
 
 interface BeforeInstallPromptEvent extends Event {
@@ -87,12 +106,26 @@ const normalizeOllamaBaseUrl = (raw: string) => {
   return withProtocol.replace(/\/+$/, "");
 };
 
-const SETTINGS_STORAGE_KEY = "mmc_settings_v1";
-const CHAT_STATE_STORAGE_KEY = "mmc_chat_state_v1";
-const ONBOARDING_DONE_STORAGE_KEY = "mmc_onboarding_done_v1";
+const SETTINGS_STORAGE_KEY = "multi_llama_settings_v1";
+const CHAT_STATE_STORAGE_KEY = "multi_llama_chat_state_v1";
+const ONBOARDING_DONE_STORAGE_KEY = "multi_llama_onboarding_done_v1";
+const DEFAULT_ROLE = "general";
+const MODEL_INSTANCE_DELIMITER = "::instance::";
+const BUILT_IN_ROLES = [
+  "general",
+  "tester",
+  "designer",
+  "pm",
+  "developer",
+  "reviewer",
+  "architect",
+  "analyst",
+];
 const DEFAULT_SETTINGS: UserSettings = {
   ollamaBaseUrl: "http://localhost:11434",
   persistDataLocally: true,
+  enableRoles: true,
+  allowSameModelMultiChat: false,
 };
 
 export default function Home() {
@@ -113,7 +146,10 @@ export default function Home() {
   const [modelChats, setModelChats] = useState<Record<string, ModelChatData>>(
     {},
   );
+  const [modelRoles, setModelRoles] = useState<Record<string, string>>({});
+  const [roleLibrary, setRoleLibrary] = useState<string[]>(BUILT_IN_ROLES);
   const [userInput, setUserInput] = useState("");
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isAllLoading, setIsAllLoading] = useState(false);
   const [ollamaError, setOllamaError] = useState("");
   const containerRef = useRef<HTMLDivElement>(null);
@@ -128,6 +164,8 @@ export default function Home() {
   const [activeMentionQuery, setActiveMentionQuery] = useState("");
   const [mentionHighlightIndex, setMentionHighlightIndex] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const attachmentInputRef = useRef<HTMLInputElement>(null);
+  const modelCardRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const startInterModelChatRef = useRef<
     ((seed?: string, modelsOverride?: string[]) => Promise<void>) | null
   >(null);
@@ -135,19 +173,24 @@ export default function Home() {
   const onboardingSteps = useMemo(
     () => [
       {
-        title: "Welcome to Multi-Model Chat",
+        title: "Welcome to Multi Llama Chat",
         description:
-          "Pick multiple models and compare responses side-by-side in one place.",
+          "Select multiple models and compare their responses side by side in one place.",
       },
       {
         title: "Use @model targeting",
         description:
-          "Type @modelname in the input to send a message only to specific selected models.",
+          "Type @modelname in the input box to send a message only to specific selected models.",
+      },
+      {
+        title: "Assign roles to models",
+        description:
+          "Click a model's role chip (for example, tester, designer, or product manager) to define how each model should behave during collaboration.",
       },
       {
         title: "Ollama is required",
         description:
-          "This app needs a reachable Ollama server. You can run Ollama locally or use a remote Ollama URL in Settings.",
+          "This app requires a reachable Ollama server. You can run Ollama locally or configure a remote Ollama URL in Settings.",
       },
     ],
     [],
@@ -158,6 +201,17 @@ export default function Home() {
     [settings.ollamaBaseUrl],
   );
 
+  const getBaseModelName = useCallback((modelKey: string) => {
+    const idx = modelKey.indexOf(MODEL_INSTANCE_DELIMITER);
+    return idx === -1 ? modelKey : modelKey.slice(0, idx);
+  }, []);
+
+  const createModelInstanceKey = useCallback((modelName: string) => {
+    return `${modelName}${MODEL_INSTANCE_DELIMITER}${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2, 8)}`;
+  }, []);
+
   useEffect(() => {
     setIsThemeReady(true);
   }, []);
@@ -167,15 +221,36 @@ export default function Home() {
       const mentionPattern = /@([^\s@]+)/g;
       const tagged = new Set<string>();
       let match: RegExpExecArray | null;
+
+      const baseToInstances = new Map<string, string[]>();
+      modelPool.forEach((modelKey) => {
+        const base = getBaseModelName(modelKey).toLowerCase();
+        const list = baseToInstances.get(base) || [];
+        list.push(modelKey);
+        baseToInstances.set(base, list);
+      });
+
       while ((match = mentionPattern.exec(input)) !== null) {
-        const token = match[1]?.toLowerCase();
+        const token = (match[1] || "").trim();
         if (!token) continue;
-        const found = modelPool.find((m) => m.toLowerCase() === token);
-        if (found) tagged.add(found);
+
+        const specificMatch = /^(.+?)#(\d+)$/i.exec(token);
+        if (specificMatch) {
+          const base = specificMatch[1].toLowerCase();
+          const index = Number.parseInt(specificMatch[2], 10);
+          if (!base || !Number.isFinite(index) || index < 1) continue;
+          const instances = baseToInstances.get(base) || [];
+          const target = instances[index - 1];
+          if (target) tagged.add(target);
+          continue;
+        }
+
+        const instances = baseToInstances.get(token.toLowerCase()) || [];
+        instances.forEach((modelKey) => tagged.add(modelKey));
       }
       return Array.from(tagged);
     },
-    [],
+    [getBaseModelName],
   );
 
   const stripModelTags = useCallback((input: string) => {
@@ -183,6 +258,79 @@ export default function Home() {
       .replace(/(^|\s)@[^\s@]+/g, "$1")
       .replace(/\s+/g, " ")
       .trim();
+  }, []);
+
+  const buildPromptForModel = useCallback(
+    (model: string, prompt: string) => {
+      if (!settings.enableRoles) return prompt;
+      const role = (modelRoles[model] || DEFAULT_ROLE).trim().toLowerCase();
+      if (!role || role === DEFAULT_ROLE) return prompt;
+      return `Role: ${role}\nInstructions: You must answer as a ${role} and stay consistent with this role.\n\n${prompt}`;
+    },
+    [modelRoles, settings.enableRoles],
+  );
+
+  const readFileAsText = (file: File) =>
+    new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => reject(new Error(`Failed to read ${file.name}`));
+      reader.readAsText(file);
+    });
+
+  const readFileAsDataUrl = (file: File) =>
+    new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => reject(new Error(`Failed to read ${file.name}`));
+      reader.readAsDataURL(file);
+    });
+
+  const handleAttachmentPick = useCallback(
+    async (files: FileList | null) => {
+      if (!files || files.length === 0) return;
+      const maxSizeBytes = 8 * 1024 * 1024;
+      const next: Attachment[] = [];
+
+      for (const file of Array.from(files)) {
+        if (file.size > maxSizeBytes) continue;
+        const isImage = file.type.startsWith("image/");
+        const isText = file.type === "text/plain" || file.name.endsWith(".txt");
+        if (!isImage && !isText) continue;
+
+        if (isImage) {
+          const dataUrl = await readFileAsDataUrl(file);
+          const base64 = dataUrl.includes(",") ? dataUrl.split(",")[1] : "";
+          if (!base64) continue;
+          next.push({
+            id: `${file.name}-${file.lastModified}-${Math.random().toString(36).slice(2, 8)}`,
+            name: file.name,
+            mimeType: file.type || "image/png",
+            kind: "image",
+            base64Content: base64,
+          });
+          continue;
+        }
+
+        const text = await readFileAsText(file);
+        next.push({
+          id: `${file.name}-${file.lastModified}-${Math.random().toString(36).slice(2, 8)}`,
+          name: file.name,
+          mimeType: file.type || "text/plain",
+          kind: "text",
+          textContent: text.slice(0, 12000),
+        });
+      }
+
+      if (next.length > 0) {
+        setAttachments((prev) => [...prev, ...next]);
+      }
+    },
+    [],
+  );
+
+  const removeAttachment = useCallback((id: string) => {
+    setAttachments((prev) => prev.filter((item) => item.id !== id));
   }, []);
 
   const updateMentionState = useCallback(
@@ -241,6 +389,66 @@ export default function Home() {
     [apiBaseUrl],
   );
 
+  const generateWithOllama = useCallback(
+    async (model: string, prompt: string, imageBase64List: string[] = []) => {
+      const request = async (
+        endpoint: "generate" | "chat",
+        body: Record<string, unknown>,
+      ) => {
+        const response = await fetch(`${apiBaseUrl}/api/${endpoint}`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(body),
+        });
+
+        const raw = await response.text();
+        let data: any = {};
+        try {
+          data = raw ? JSON.parse(raw) : {};
+        } catch {
+          data = { error: raw };
+        }
+
+        if (!response.ok) {
+          const reason = data?.error || data?.message || `HTTP ${response.status}`;
+          throw new Error(`${reason} [${apiBaseUrl}/api/${endpoint}]`);
+        }
+
+        return data;
+      };
+
+      try {
+        const data = await request("generate", {
+          model: model.trim(),
+          prompt,
+          ...(imageBase64List.length > 0 ? { images: imageBase64List } : {}),
+          stream: false,
+        });
+        return typeof data.response === "string"
+          ? data.response
+          : String(data.response || "");
+      } catch {
+        const data = await request("chat", {
+          model: model.trim(),
+          messages: [
+            {
+              role: "user",
+              content: prompt,
+              ...(imageBase64List.length > 0 ? { images: imageBase64List } : {}),
+            },
+          ],
+          stream: false,
+        });
+        return typeof data?.message?.content === "string"
+          ? data.message.content
+          : String(data?.message?.content || "");
+      }
+    },
+    [apiBaseUrl],
+  );
+
   useEffect(() => {
     try {
       const rawSettings = localStorage.getItem(SETTINGS_STORAGE_KEY);
@@ -256,6 +464,14 @@ export default function Home() {
             typeof parsed.persistDataLocally === "boolean"
               ? parsed.persistDataLocally
               : DEFAULT_SETTINGS.persistDataLocally,
+          enableRoles:
+            typeof parsed.enableRoles === "boolean"
+              ? parsed.enableRoles
+              : DEFAULT_SETTINGS.enableRoles,
+          allowSameModelMultiChat:
+            typeof parsed.allowSameModelMultiChat === "boolean"
+              ? parsed.allowSameModelMultiChat
+              : DEFAULT_SETTINGS.allowSameModelMultiChat,
         });
       }
 
@@ -269,8 +485,21 @@ export default function Home() {
           parsed.modelChats && typeof parsed.modelChats === "object"
             ? parsed.modelChats
             : {};
+        const loadedRoles =
+          parsed.modelRoles && typeof parsed.modelRoles === "object"
+            ? parsed.modelRoles
+            : {};
+        const loadedRoleLibrary = Array.isArray(parsed.roleLibrary)
+          ? parsed.roleLibrary.filter(
+              (v): v is string => typeof v === "string" && !!v.trim(),
+            )
+          : [];
         setSelectedModels(loadedSelected);
         setModelChats(loadedChats);
+        setModelRoles(loadedRoles);
+        if (loadedRoleLibrary.length > 0) {
+          setRoleLibrary(Array.from(new Set([...BUILT_IN_ROLES, ...loadedRoleLibrary])));
+        }
       }
 
       const onboardingDone =
@@ -301,9 +530,18 @@ export default function Home() {
     const payload: PersistedChatState = {
       selectedModels,
       modelChats,
+      modelRoles,
+      roleLibrary,
     };
     localStorage.setItem(CHAT_STATE_STORAGE_KEY, JSON.stringify(payload));
-  }, [isHydrated, settings.persistDataLocally, selectedModels, modelChats]);
+  }, [
+    isHydrated,
+    settings.persistDataLocally,
+    selectedModels,
+    modelChats,
+    modelRoles,
+    roleLibrary,
+  ]);
 
   useEffect(() => {
     if (!("serviceWorker" in navigator)) return;
@@ -361,6 +599,7 @@ export default function Home() {
     localStorage.removeItem(CHAT_STATE_STORAGE_KEY);
     setSelectedModels([]);
     setModelChats({});
+    setModelRoles({});
     setUserInput("");
   }, []);
 
@@ -389,6 +628,18 @@ export default function Home() {
     await fetchOllamaModels(true);
   }, [fetchOllamaModels]);
 
+  const handleTestConnection = useCallback(async () => {
+    const toastId = toast.loading("Testing Ollama connection...");
+    const ok = await fetchOllamaModels(false);
+    if (ok) {
+      toast.success("Connected to Ollama successfully.", { id: toastId });
+      return;
+    }
+    toast.error(`Unable to connect to ${apiBaseUrl || "configured host"}.`, {
+      id: toastId,
+    });
+  }, [fetchOllamaModels, apiBaseUrl]);
+
   // Keep model list synced with current Ollama URL
   useEffect(() => {
     fetchOllamaModels(false);
@@ -398,39 +649,101 @@ export default function Home() {
     interChatActiveRef.current = isInterModelChatActive;
   }, [isInterModelChatActive]);
 
-  const removeModel = useCallback((model: string) => {
-    setSelectedModels((prev) => prev.filter((m) => m !== model));
+  const removeModel = useCallback((modelKey: string) => {
+    setSelectedModels((prev) => prev.filter((m) => m !== modelKey));
     setModelChats((prev) => {
       const updated = { ...prev };
-      delete updated[model];
+      delete updated[modelKey];
+      return updated;
+    });
+    setModelRoles((prev) => {
+      const updated = { ...prev };
+      delete updated[modelKey];
       return updated;
     });
   }, []);
 
-  const toggleModel = useCallback(
-    (model: string) => {
-      if (isInterModelSelected || isInterModelChatActive) return;
-      if (selectedModels.includes(model)) {
-        // Remove if already selected
-        removeModel(model);
-      } else {
-        // Add if not selected
-        setSelectedModels((prev) => [...prev, model]);
-        setModelChats((prev) => ({
-          ...prev,
-          [model]: {
-            modelName: model,
-            messages: [],
-            isLoading: false,
-          },
-        }));
-      }
+  const addModelInstance = useCallback(
+    (modelName: string) => {
+      const modelKey = createModelInstanceKey(modelName);
+      setSelectedModels((prev) => [...prev, modelKey]);
+      setModelChats((prev) => ({
+        ...prev,
+        [modelKey]: {
+          modelName,
+          messages: [],
+          isLoading: false,
+        },
+      }));
+      setModelRoles((prev) => ({
+        ...prev,
+        [modelKey]: prev[modelKey] || DEFAULT_ROLE,
+      }));
     },
-    [selectedModels, removeModel, isInterModelSelected, isInterModelChatActive],
+    [createModelInstanceKey],
   );
 
+  const duplicateModelInstance = useCallback(
+    (modelKey: string) => {
+      const sourceChat = modelChats[modelKey];
+      if (!sourceChat) return;
+      const baseModel = getBaseModelName(modelKey);
+      const clonedKey = createModelInstanceKey(baseModel);
+
+      setSelectedModels((prev) => [...prev, clonedKey]);
+      setModelChats((prev) => ({
+        ...prev,
+        [clonedKey]: {
+          modelName: baseModel,
+          messages: (prev[modelKey]?.messages || []).map((m) => ({ ...m })),
+          isLoading: false,
+        },
+      }));
+      setModelRoles((prev) => ({
+        ...prev,
+        [clonedKey]: prev[modelKey] || DEFAULT_ROLE,
+      }));
+    },
+    [modelChats, getBaseModelName, createModelInstanceKey],
+  );
+
+  const toggleModel = useCallback(
+    (modelName: string) => {
+      if (isInterModelSelected || isInterModelChatActive) return;
+      const selectedForBase = selectedModels.filter(
+        (modelKey) => getBaseModelName(modelKey) === modelName,
+      );
+      if (selectedForBase.length > 0) {
+        // Toggle off removes all instances for this model name.
+        selectedForBase.forEach((modelKey) => removeModel(modelKey));
+      } else {
+        addModelInstance(modelName);
+      }
+    },
+    [
+      selectedModels,
+      removeModel,
+      addModelInstance,
+      getBaseModelName,
+      isInterModelSelected,
+      isInterModelChatActive,
+    ],
+  );
+
+  const updateModelRole = useCallback((model: string, role: string) => {
+    const normalized = role.trim().toLowerCase() || DEFAULT_ROLE;
+    setModelRoles((prev) => ({
+      ...prev,
+      [model]: normalized,
+    }));
+    setRoleLibrary((prev) =>
+      prev.includes(normalized) ? prev : [...prev, normalized],
+    );
+  }, []);
+
   const sendMessage = useCallback(async () => {
-    if (!userInput.trim() || selectedModels.length === 0) return;
+    if ((!userInput.trim() && attachments.length === 0) || selectedModels.length === 0)
+      return;
     if (!apiBaseUrl) {
       setOllamaError("Set a valid Ollama host URL in Settings.");
       return;
@@ -440,9 +753,41 @@ export default function Home() {
     const targetModels =
       taggedModels.length > 0 ? taggedModels : [...selectedModels];
     const messageContent = stripModelTags(userInput);
-    if (!messageContent) return;
+    const textAttachments = attachments.filter((item) => item.kind === "text");
+    const imageAttachments = attachments.filter((item) => item.kind === "image");
+    const textAttachmentBlock =
+      textAttachments.length > 0
+        ? `\n\nAttached text files:\n${textAttachments
+            .map(
+              (item) =>
+                `\n[${item.name}]\n${item.textContent || "(empty file)"}`,
+            )
+            .join("\n")}`
+        : "";
+    const imageContextBlock =
+      imageAttachments.length > 0
+        ? `\n\nAttached images: ${imageAttachments.map((item) => item.name).join(", ")}`
+        : "";
+    const mergedUserPrompt = `${messageContent}${textAttachmentBlock}${imageContextBlock}`.trim();
+    if (!mergedUserPrompt && imageAttachments.length === 0) return;
+    const userMessageForUi =
+      messageContent ||
+      [
+        textAttachments.length > 0
+          ? `${textAttachments.length} text file${textAttachments.length > 1 ? "s" : ""}`
+          : "",
+        imageAttachments.length > 0
+          ? `${imageAttachments.length} image${imageAttachments.length > 1 ? "s" : ""}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join(" + ");
+    const imagePayload = imageAttachments
+      .map((item) => item.base64Content || "")
+      .filter(Boolean);
 
     setUserInput("");
+    setAttachments([]);
     setActiveMentionStart(null);
     setActiveMentionEnd(null);
     setActiveMentionQuery("");
@@ -461,7 +806,7 @@ export default function Home() {
           ...current,
           messages: [
             ...current.messages,
-            { role: "user", content: messageContent },
+            { role: "user", content: userMessageForUi },
           ],
           isLoading: true,
         };
@@ -469,7 +814,7 @@ export default function Home() {
       });
       setIsInterModelSelected(false);
       if (startInterModelChatRef.current) {
-        await startInterModelChatRef.current(messageContent, targetModels);
+        await startInterModelChatRef.current(mergedUserPrompt, targetModels);
       }
       setIsAllLoading(false);
       return;
@@ -483,7 +828,7 @@ export default function Home() {
           ...updated[model],
           messages: [
             ...updated[model].messages,
-            { role: "user", content: messageContent },
+            { role: "user", content: userMessageForUi },
           ],
           isLoading: true,
         };
@@ -494,21 +839,11 @@ export default function Home() {
     // Send message to all models in parallel
     const promises = targetModels.map(async (model) => {
       try {
-        const response = await fetch(`${apiBaseUrl}/api/generate`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            model: model,
-            prompt: messageContent,
-            stream: false,
-          }),
-        });
-
-        if (!response.ok)
-          throw new Error(`Failed to get response from ${model}`);
-        const data = await response.json();
+        const ai = await generateWithOllama(
+          getBaseModelName(model),
+          buildPromptForModel(model, mergedUserPrompt),
+          imagePayload,
+        );
 
         // Add assistant response
         setModelChats((prev) => ({
@@ -517,13 +852,15 @@ export default function Home() {
             ...prev[model],
             messages: [
               ...prev[model].messages,
-              { role: "assistant", content: data.response },
+              { role: "assistant", content: ai },
             ],
             isLoading: false,
           },
         }));
       } catch (error) {
         console.error(`[v0] Error with model ${model}:`, error);
+        const detail =
+          error instanceof Error ? error.message : "Unknown error";
         setModelChats((prev) => ({
           ...prev,
           [model]: {
@@ -532,7 +869,7 @@ export default function Home() {
               ...prev[model].messages,
               {
                 role: "assistant",
-                content: `Error: Could not get response from ${model}`,
+                content: `Error: Could not get response from ${getBaseModelName(model)}. ${detail}`,
               },
             ],
             isLoading: false,
@@ -545,19 +882,37 @@ export default function Home() {
     setIsAllLoading(false);
   }, [
     userInput,
+    attachments,
     selectedModels,
     isInterModelSelected,
     parseTaggedModels,
     stripModelTags,
     apiBaseUrl,
+    generateWithOllama,
+    getBaseModelName,
+    buildPromptForModel,
   ]);
 
   const mentionSuggestions = useMemo(() => {
     const query = activeMentionQuery.toLowerCase();
-    return selectedModels.filter((model) =>
-      model.toLowerCase().includes(query),
-    );
-  }, [selectedModels, activeMentionQuery]);
+    const counts: Record<string, number> = {};
+    selectedModels.forEach((modelKey) => {
+      const base = getBaseModelName(modelKey);
+      counts[base] = (counts[base] || 0) + 1;
+    });
+
+    const tokens: string[] = [];
+    Object.entries(counts).forEach(([base, count]) => {
+      tokens.push(base);
+      if (count > 1) {
+        for (let i = 1; i <= count; i += 1) {
+          tokens.push(`${base}#${i}`);
+        }
+      }
+    });
+
+    return tokens.filter((token) => token.toLowerCase().includes(query));
+  }, [selectedModels, activeMentionQuery, getBaseModelName]);
 
   const isMentionOpen =
     activeMentionStart !== null &&
@@ -627,7 +982,9 @@ export default function Home() {
       e.key === "Enter" &&
       !e.shiftKey &&
       !isAllLoading &&
-      selectedModels.length > 0
+      !isInterModelChatActive &&
+      selectedModels.length > 0 &&
+      (userInput.trim().length > 0 || attachments.length > 0)
     ) {
       e.preventDefault();
       sendMessage();
@@ -637,8 +994,33 @@ export default function Home() {
   const handleAutoResize = (el: HTMLTextAreaElement | null) => {
     if (!el) return;
     el.style.height = "auto";
-    el.style.height = Math.min(el.scrollHeight, 240) + "px";
+    const maxHeight = 160;
+    const nextHeight = Math.min(el.scrollHeight, maxHeight);
+    el.style.height = `${nextHeight}px`;
+    el.style.overflowY = el.scrollHeight > maxHeight ? "auto" : "hidden";
   };
+
+  const ensureModelCardVisible = useCallback((model: string) => {
+    const container = containerRef.current;
+    const card = modelCardRefs.current[model];
+    if (!container || !card) return;
+    const gutter = 20;
+    const containerRect = container.getBoundingClientRect();
+    const cardRect = card.getBoundingClientRect();
+
+    let delta = 0;
+    if (cardRect.left < containerRect.left + gutter) {
+      delta = cardRect.left - (containerRect.left + gutter);
+    } else if (cardRect.right > containerRect.right - gutter) {
+      delta = cardRect.right - (containerRect.right - gutter);
+    }
+    if (delta !== 0) {
+      container.scrollTo({
+        left: container.scrollLeft + delta,
+        behavior: "smooth",
+      });
+    }
+  }, []);
 
   const getLastMessageOfRole = useCallback(
     (model: string, role: Message["role"]) => {
@@ -696,52 +1078,25 @@ export default function Home() {
               isLoading: true,
             },
           }));
-          const response = await fetch(`${apiBaseUrl}/api/generate`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
+          const ai = await generateWithOllama(
+            getBaseModelName(model),
+            buildPromptForModel(model, seed),
+          );
+          seed = ai;
+          setModelChats((prev) => ({
+            ...prev,
+            [model]: {
+              ...prev[model],
+              messages: [
+                ...prev[model].messages,
+                { role: "assistant", content: ai },
+              ],
+              isLoading: false,
             },
-            body: JSON.stringify({
-              model,
-              prompt: seed,
-              stream: false,
-            }),
-          });
-          if (response.ok) {
-            const data = await response.json();
-            const ai =
-              typeof data.response === "string"
-                ? data.response
-                : String(data.response || "");
-            seed = ai;
-            setModelChats((prev) => ({
-              ...prev,
-              [model]: {
-                ...prev[model],
-                messages: [
-                  ...prev[model].messages,
-                  { role: "assistant", content: ai },
-                ],
-                isLoading: false,
-              },
-            }));
-          } else {
-            setModelChats((prev) => ({
-              ...prev,
-              [model]: {
-                ...prev[model],
-                messages: [
-                  ...prev[model].messages,
-                  {
-                    role: "assistant",
-                    content: `Error: Could not get response from ${model}`,
-                  },
-                ],
-                isLoading: false,
-              },
-            }));
-          }
-        } catch {
+          }));
+        } catch (error) {
+          const detail =
+            error instanceof Error ? error.message : "Unknown error";
           setModelChats((prev) => ({
             ...prev,
             [model]: {
@@ -750,7 +1105,7 @@ export default function Home() {
                 ...prev[model].messages,
                 {
                   role: "assistant",
-                  content: `Error: Could not get response from ${model}`,
+                  content: `Error: Could not get response from ${getBaseModelName(model)}. ${detail}`,
                 },
               ],
               isLoading: false,
@@ -767,6 +1122,9 @@ export default function Home() {
       getLastAssistantMessageAny,
       getLastUserMessageAny,
       apiBaseUrl,
+      generateWithOllama,
+      getBaseModelName,
+      buildPromptForModel,
     ],
   );
 
@@ -779,9 +1137,74 @@ export default function Home() {
     startInterModelChatRef.current = startInterModelChat;
   }, [startInterModelChat]);
 
+  useEffect(() => {
+    if (!currentThinkingModel) return;
+    ensureModelCardVisible(currentThinkingModel);
+  }, [currentThinkingModel, ensureModelCardVisible]);
+
+  useEffect(() => {
+    if (settings.allowSameModelMultiChat) return;
+    const seen = new Set<string>();
+    const deduped = selectedModels.filter((modelKey) => {
+      const base = getBaseModelName(modelKey);
+      if (seen.has(base)) return false;
+      seen.add(base);
+      return true;
+    });
+    if (deduped.length === selectedModels.length) return;
+    const dedupedSet = new Set(deduped);
+    setSelectedModels(deduped);
+    setModelChats((prev) => {
+      const next: Record<string, ModelChatData> = {};
+      Object.keys(prev).forEach((k) => {
+        if (dedupedSet.has(k)) next[k] = prev[k];
+      });
+      return next;
+    });
+    setModelRoles((prev) => {
+      const next: Record<string, string> = {};
+      Object.keys(prev).forEach((k) => {
+        if (dedupedSet.has(k)) next[k] = prev[k];
+      });
+      return next;
+    });
+  }, [settings.allowSameModelMultiChat, selectedModels, getBaseModelName]);
+
+  const modelDisplayNameByKey = useMemo(() => {
+    const seenCount: Record<string, number> = {};
+    const totalCount: Record<string, number> = {};
+    selectedModels.forEach((modelKey) => {
+      const base = getBaseModelName(modelKey);
+      totalCount[base] = (totalCount[base] || 0) + 1;
+    });
+
+    const out: Record<string, string> = {};
+    selectedModels.forEach((modelKey) => {
+      const base = getBaseModelName(modelKey);
+      seenCount[base] = (seenCount[base] || 0) + 1;
+      out[modelKey] =
+        totalCount[base] > 1 ? `${base} (${seenCount[base]})` : base;
+    });
+    return out;
+  }, [selectedModels, getBaseModelName]);
+
   const taggedSelectedModels = useMemo(
-    () => parseTaggedModels(userInput, selectedModels),
-    [userInput, selectedModels, parseTaggedModels],
+    () =>
+      Array.from(
+        new Set(
+          parseTaggedModels(userInput, selectedModels).map(
+            (modelKey) =>
+              modelDisplayNameByKey[modelKey] || getBaseModelName(modelKey),
+          ),
+        ),
+      ),
+    [
+      userInput,
+      selectedModels,
+      parseTaggedModels,
+      getBaseModelName,
+      modelDisplayNameByKey,
+    ],
   );
   const isLastOnboardingStep = onboardingStep === onboardingSteps.length - 1;
 
@@ -789,9 +1212,16 @@ export default function Home() {
     <div className="flex h-screen flex-col bg-background">
       <div className="border-b border-border bg-background/95 backdrop-blur">
         <div className="max-w-7xl mx-auto px-6 py-2 flex items-center justify-between">
-          <h1 className="text-xs font-semibold tracking-wide text-foreground">
-            Multi-Model Chat
-          </h1>
+          <div className="flex items-center gap-2">
+              <img
+                src="/logo.png"
+                alt="Multi Llama Chat logo"
+                className="h-5 w-5 object-contain invert dark:invert-0"
+              />
+            <h1 className="text-xs font-semibold tracking-wide text-foreground">
+              Multi Llama Chat
+            </h1>
+          </div>
           <div className="flex items-center gap-2">
             <button
               type="button"
@@ -826,14 +1256,17 @@ export default function Home() {
       {/* Chat Area */}
       <div
         ref={containerRef}
-        className={`flex-1 overflow-x-auto overflow-y-hidden flex gap-3 p-3 md:gap-4 md:p-4 bg-gradient-to-b from-background to-background ${
+        className={`slim-scrollbar flex-1 overflow-x-auto overflow-y-hidden flex gap-3 p-3 md:gap-4 md:p-4 scroll-px-5 bg-gradient-to-b from-background to-background ${
           selectedModels.length === 1 ? "justify-center" : ""
         }`}
       >
         {selectedModels.length > 0 ? (
-          selectedModels.map((model) => (
+          selectedModels.map((modelKey) => (
             <div
-              key={model}
+              key={modelKey}
+              ref={(el) => {
+                modelCardRefs.current[modelKey] = el;
+              }}
               className={`flex-shrink-0 ${
                 selectedModels.length === 1
                   ? "w-full max-w-[600px]"
@@ -841,15 +1274,25 @@ export default function Home() {
               }`}
             >
               <ModelChat
-                model={model}
+                model={modelDisplayNameByKey[modelKey] || getBaseModelName(modelKey)}
+                role={modelRoles[modelKey] || DEFAULT_ROLE}
+                roleOptions={roleLibrary}
+                onRoleChange={(role) => updateModelRole(modelKey, role)}
+                enableRoleAssignment={settings.enableRoles}
                 chat={
-                  modelChats[model] || {
-                    modelName: model,
+                  modelChats[modelKey] || {
+                    modelName: getBaseModelName(modelKey),
                     messages: [],
                     isLoading: false,
                   }
                 }
-                onRemove={() => removeModel(model)}
+                onDuplicate={
+                  settings.allowSameModelMultiChat
+                    ? () => duplicateModelInstance(modelKey)
+                    : undefined
+                }
+                disableDuplicate={isInterModelChatActive}
+                onRemove={() => removeModel(modelKey)}
                 disableRemove={isInterModelChatActive}
               />
             </div>
@@ -857,8 +1300,13 @@ export default function Home() {
         ) : (
           <div className="flex-1 flex items-center justify-center">
             <div className="text-center">
+              <img
+                src="/logo.png"
+                alt="Multi Llama Chat logo"
+                className="h-20 w-20 object-contain mx-auto mb-3 invert dark:invert-0"
+              />
               <h2 className="text-3xl font-bold text-foreground mb-2">
-                Multi-Model Chat
+                Multi Llama Chat
               </h2>
               {ollamaError ? (
                 <div className="mb-8 max-w-md flex flex-col items-center gap-3">
@@ -888,96 +1336,171 @@ export default function Home() {
 
       {/* Input Area */}
       <div className="border-t border-border bg-background px-3 py-2 md:px-4 md:py-3">
-        <div className="max-w-7xl mx-auto space-y-2">
+        <div className="max-w-7xl mx-auto space-y-3">
           <div
             className={`${selectedModels.length === 1 ? "max-w-none" : "max-w-2xl"} w-full mx-auto flex gap-1.5 flex-wrap justify-center ${isInterModelChatActive ? "opacity-50 pointer-events-none" : ""}`}
           >
             {availableModels.map((model) => {
-              const isSelected = selectedModels.includes(model);
+              const instanceCount = selectedModels.filter(
+                (modelKey) => getBaseModelName(modelKey) === model,
+              ).length;
+              const isSelected = instanceCount > 0;
               return (
-                <button
+                <div
                   key={model}
-                  onClick={() => toggleModel(model)}
-                  className={`px-2.5 py-0.5 rounded-full border text-xs transition-colors ${
+                  className={`inline-flex items-center rounded-full border text-sm transition-colors overflow-hidden ${
                     isSelected
                       ? "bg-primary text-primary-foreground border-primary"
-                      : "bg-card text-foreground border-border hover:bg-muted/40"
+                      : "bg-card text-foreground border-border"
                   }`}
-                  aria-label={`Toggle ${model}`}
                 >
-                  {model}
-                </button>
+                  <button
+                    onClick={() => toggleModel(model)}
+                    className={`px-3 py-1 ${!isSelected ? "hover:bg-muted/40" : ""}`}
+                    aria-label={`Toggle ${model}`}
+                  >
+                    {model}
+                    {instanceCount > 1 ? ` x${instanceCount}` : ""}
+                  </button>
+                  {settings.allowSameModelMultiChat && isSelected && (
+                    <button
+                      type="button"
+                      onClick={() => addModelInstance(model)}
+                      disabled={isInterModelSelected || isInterModelChatActive}
+                      className="h-full px-2.5 py-1 border-l border-primary-foreground/30 text-sm leading-none hover:bg-primary-foreground/15 disabled:opacity-50 disabled:cursor-not-allowed"
+                      aria-label={`Add another ${model}`}
+                    >
+                      +
+                    </button>
+                  )}
+                </div>
               );
             })}
           </div>
 
           {selectedModels.length > 0 && (
-            <div className="max-w-2xl w-full mx-auto flex gap-1.5 items-center relative">
-              {/* Inter-model button always visible if input area is visible (1+ models) */}
-              <TooltipProvider>
-                <Tooltip open={isInterModelChatActive || undefined}>
-                  <TooltipTrigger asChild>
-                    <button
-                      onClick={() => {
-                        // Allow clicking if we are in inter-model chat (to stop it), even if loading
-                        if (isAllLoading && !isInterModelChatActive) return;
-
-                        if (isInterModelChatActive) {
-                          stopInterModelChat();
-                          setIsInterModelSelected(false);
-                        } else if (isInterModelSelected) {
-                          setIsInterModelSelected(false);
-                        } else {
-                          if (selectedModels.length < 2) return;
-                          setIsInterModelSelected(true);
-                        }
-                      }}
-                      // Only disable for loading if NOT in inter-model chat (so we can stop it)
-                      disabled={isAllLoading && !isInterModelChatActive}
-                      className={`relative w-9 h-9 rounded-full border flex items-center justify-center overflow-hidden transition-all duration-300 ${
-                        isInterModelChatActive
-                          ? "bg-background border-violet-300/60 text-white shadow-[0_0_18px_rgba(124,58,237,0.35)] hover:border-red-400"
-                          : isInterModelSelected
-                            ? "bg-background border-violet-200/60 text-white shadow-[0_0_10px_rgba(124,58,237,0.22)]"
-                            : selectedModels.length < 2
-                              ? "opacity-50 cursor-not-allowed bg-background border-border text-muted-foreground"
-                              : "bg-background border-violet-100/50 text-white/90 hover:border-violet-200/70 disabled:opacity-40 disabled:cursor-not-allowed"
-                      }`}
-                      aria-label="Inter-model communication"
+            <div className="max-w-2xl w-full mx-auto space-y-1.5">
+              <input
+                ref={attachmentInputRef}
+                type="file"
+                accept="image/*,.txt,text/plain"
+                multiple
+                className="hidden"
+                onChange={async (e) => {
+                  await handleAttachmentPick(e.target.files);
+                  e.currentTarget.value = "";
+                }}
+              />
+              {attachments.length > 0 && (
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {attachments.map((item) => (
+                    <span
+                      key={item.id}
+                      className="inline-flex items-center gap-1 rounded-full border border-border bg-card px-2 py-1 text-[11px] text-foreground"
                     >
-                      <span
-                        className={`absolute inset-0 rounded-full transition-all duration-300 ${
+                      {item.kind === "image" ? (
+                        <ImageIcon className="h-3 w-3 text-muted-foreground" />
+                      ) : (
+                        <FileText className="h-3 w-3 text-muted-foreground" />
+                      )}
+                      <span className="max-w-[180px] truncate">{item.name}</span>
+                      <button
+                        type="button"
+                        onClick={() => removeAttachment(item.id)}
+                        className="inline-flex h-4 w-4 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground"
+                        aria-label={`Remove ${item.name}`}
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+              {attachments.some((item) => item.kind === "image") && (
+                <p className="text-[11px] text-muted-foreground">
+                  Image attachments may require a vision-capable Ollama model.
+                </p>
+              )}
+              <div className="flex gap-1.5 items-center relative">
+                {/* Inter-model button always visible if input area is visible (1+ models) */}
+                <TooltipProvider>
+                  <Tooltip open={isInterModelChatActive || undefined}>
+                    <TooltipTrigger asChild>
+                      <button
+                        onClick={() => {
+                          // Allow clicking if we are in inter-model chat (to stop it), even if loading
+                          if (isAllLoading && !isInterModelChatActive) return;
+
+                          if (isInterModelChatActive) {
+                            stopInterModelChat();
+                            setIsInterModelSelected(false);
+                          } else if (isInterModelSelected) {
+                            setIsInterModelSelected(false);
+                          } else {
+                            if (selectedModels.length < 2) return;
+                            setIsInterModelSelected(true);
+                          }
+                        }}
+                        // Only disable for loading if NOT in inter-model chat (so we can stop it)
+                        disabled={isAllLoading && !isInterModelChatActive}
+                        className={`relative w-9 h-9 rounded-full border flex items-center justify-center overflow-hidden transition-all duration-300 ${
                           isInterModelChatActive
-                            ? "bg-[conic-gradient(from_220deg_at_50%_50%,#60a5fa_0deg,#818cf8_110deg,#a78bfa_210deg,#f472b6_300deg,#60a5fa_360deg)] opacity-95 animate-pulse"
+                            ? "bg-background border-violet-300/60 text-white shadow-[0_0_18px_rgba(124,58,237,0.35)] hover:border-red-400"
                             : isInterModelSelected
-                              ? "bg-[conic-gradient(from_220deg_at_50%_50%,#7dd3fc_0deg,#818cf8_140deg,#c4b5fd_240deg,#f9a8d4_320deg,#7dd3fc_360deg)] opacity-85"
-                              : "bg-[conic-gradient(from_220deg_at_50%_50%,#bae6fd_0deg,#c7d2fe_160deg,#e9d5ff_260deg,#fbcfe8_340deg,#bae6fd_360deg)] opacity-65"
+                              ? "bg-background border-violet-200/60 text-white shadow-[0_0_10px_rgba(124,58,237,0.22)]"
+                              : selectedModels.length < 2
+                                ? "opacity-50 cursor-not-allowed bg-background border-border text-muted-foreground"
+                                : "bg-background border-violet-100/50 text-white/90 hover:border-violet-200/70 disabled:opacity-40 disabled:cursor-not-allowed"
                         }`}
-                      />
-                      <span
-                        className={`absolute -inset-2 rounded-full blur-md transition-all ${
-                          isInterModelChatActive
-                            ? "bg-[radial-gradient(circle,#8b5cf6_0%,rgba(59,130,246,0.35)_45%,transparent_80%)] opacity-80"
-                            : isInterModelSelected
-                              ? "bg-[radial-gradient(circle,#8b5cf6_0%,rgba(59,130,246,0.2)_45%,transparent_80%)] opacity-60"
-                              : "bg-[radial-gradient(circle,#a78bfa_0%,rgba(59,130,246,0.12)_45%,transparent_80%)] opacity-45"
-                        }`}
-                      />
-                      <MessagesSquare className="w-3.5 h-3.5 relative z-10 text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.35)]" />
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    {selectedModels.length < 2
-                      ? "Select at least 2 models for inter-model communication"
-                      : isInterModelChatActive
-                        ? `Inter-model active. Click to stop. Thinking: ${currentThinkingModel || "..."}`
-                        : isInterModelSelected
-                          ? "Inter-model: Selected (send to start)"
-                          : "Inter-model: Off"}
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-              <div className="relative flex-1">
+                        aria-label="Inter-model communication"
+                      >
+                        <span
+                          className={`absolute inset-0 rounded-full transition-all duration-300 ${
+                            isInterModelChatActive
+                              ? "bg-[conic-gradient(from_220deg_at_50%_50%,#60a5fa_0deg,#818cf8_110deg,#a78bfa_210deg,#f472b6_300deg,#60a5fa_360deg)] opacity-95 animate-pulse"
+                              : isInterModelSelected
+                                ? "bg-[conic-gradient(from_220deg_at_50%_50%,#7dd3fc_0deg,#818cf8_140deg,#c4b5fd_240deg,#f9a8d4_320deg,#7dd3fc_360deg)] opacity-85"
+                                : "bg-[conic-gradient(from_220deg_at_50%_50%,#bae6fd_0deg,#c7d2fe_160deg,#e9d5ff_260deg,#fbcfe8_340deg,#bae6fd_360deg)] opacity-65"
+                          }`}
+                        />
+                        <span
+                          className={`absolute -inset-2 rounded-full blur-md transition-all ${
+                            isInterModelChatActive
+                              ? "bg-[radial-gradient(circle,#8b5cf6_0%,rgba(59,130,246,0.35)_45%,transparent_80%)] opacity-80"
+                              : isInterModelSelected
+                                ? "bg-[radial-gradient(circle,#8b5cf6_0%,rgba(59,130,246,0.2)_45%,transparent_80%)] opacity-60"
+                                : "bg-[radial-gradient(circle,#a78bfa_0%,rgba(59,130,246,0.12)_45%,transparent_80%)] opacity-45"
+                          }`}
+                        />
+                        <MessagesSquare className="w-3.5 h-3.5 relative z-10 text-white drop-shadow-[0_1px_2px_rgba(0,0,0,0.35)]" />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      {selectedModels.length < 2
+                        ? "Select at least 2 models for inter-model communication"
+                        : isInterModelChatActive
+                          ? `Inter-model active. Click to stop. Thinking: ${
+                              currentThinkingModel
+                                ? modelDisplayNameByKey[currentThinkingModel] ||
+                                  getBaseModelName(currentThinkingModel)
+                                : "..."
+                            }`
+                          : isInterModelSelected
+                            ? "Inter-model: Selected (send to start)"
+                            : "Inter-model: Off"}
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+                <button
+                  type="button"
+                  onClick={() => attachmentInputRef.current?.click()}
+                  disabled={isAllLoading || isInterModelChatActive}
+                  className="h-9 w-9 rounded-full border border-border bg-card hover:bg-muted/50 transition-colors inline-flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
+                  aria-label="Add attachment"
+                >
+                  <Paperclip className="h-4 w-4 text-foreground" />
+                </button>
+                <div className="relative flex-1">
                 <Textarea
                   placeholder="Ask something... (use @model to target one or more selected models)"
                   value={userInput}
@@ -1006,8 +1529,7 @@ export default function Home() {
                     }, 120);
                   }}
                   onKeyDown={handleKeyDown}
-                  disabled={isAllLoading || isInterModelChatActive}
-                  className="flex-1 bg-card border border-border text-sm px-3 py-1.5 rounded-md resize-none min-h-[38px]"
+                  className="flex-1 bg-card border border-border text-sm leading-5 px-3 py-2 rounded-2xl resize-none min-h-[38px] max-h-[160px] transition-[border-color,box-shadow] duration-150"
                   rows={1}
                   ref={(el) => {
                     textareaRef.current = el;
@@ -1043,7 +1565,7 @@ export default function Home() {
                   isAllLoading ||
                   isInterModelChatActive ||
                   selectedModels.length === 0 ||
-                  !userInput.trim()
+                  (!userInput.trim() && attachments.length === 0)
                 }
                 aria-label="Send message"
                 className="h-9 w-9 rounded-full bg-primary text-primary-foreground shadow-sm hover:scale-[1.02] hover:bg-primary/90 active:scale-[0.98] transition-all shrink-0"
@@ -1055,10 +1577,11 @@ export default function Home() {
                 )}
               </Button>
             </div>
+            </div>
           )}
 
           {selectedModels.length > 0 && taggedSelectedModels.length > 0 && (
-            <div className="max-w-2xl w-full mx-auto flex items-center gap-1.5 flex-wrap">
+            <div className="max-w-2xl w-full mx-auto flex items-center justify-center gap-1.5 flex-wrap text-center">
               <span className="text-xs text-muted-foreground">
                 Tagged models:
               </span>
@@ -1123,23 +1646,56 @@ export default function Home() {
               </p>
             </div>
 
-            <div className="rounded-md border border-border/70 bg-muted/20 p-3">
-              <label className="flex items-start gap-2 text-sm text-foreground">
-                <input
-                  type="checkbox"
-                  className="mt-0.5"
-                  checked={settings.persistDataLocally}
-                  onChange={(e) =>
-                    setSettings((prev) => ({
-                      ...prev,
-                      persistDataLocally: e.target.checked,
-                    }))
-                  }
-                />
-                <span>
+            <div className="rounded-md border border-border/70 bg-muted/20 p-3 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-sm text-foreground">
                   Persist selected models and chats in browser local storage
                 </span>
-              </label>
+                <Switch
+                  checked={settings.persistDataLocally}
+                  onCheckedChange={(checked) =>
+                    setSettings((prev) => ({
+                      ...prev,
+                      persistDataLocally: checked,
+                    }))
+                  }
+                  aria-label="Persist data locally"
+                />
+              </div>
+            </div>
+
+            <div className="rounded-md border border-border/70 bg-muted/20 p-3">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-sm text-foreground">Enable Roles</span>
+                <Switch
+                  checked={settings.enableRoles}
+                  onCheckedChange={(checked) =>
+                    setSettings((prev) => ({
+                      ...prev,
+                      enableRoles: checked,
+                    }))
+                  }
+                  aria-label="Enable role assignment"
+                />
+              </div>
+            </div>
+
+            <div className="rounded-md border border-border/70 bg-muted/20 p-3">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-sm text-foreground">
+                  Allow same model multi chat
+                </span>
+                <Switch
+                  checked={settings.allowSameModelMultiChat}
+                  onCheckedChange={(checked) =>
+                    setSettings((prev) => ({
+                      ...prev,
+                      allowSameModelMultiChat: checked,
+                    }))
+                  }
+                  aria-label="Allow same model multiple instances"
+                />
+              </div>
             </div>
 
             <div className="flex items-center gap-2 flex-wrap pt-1">
@@ -1147,7 +1703,7 @@ export default function Home() {
                 type="button"
                 variant="outline"
                 size="sm"
-                onClick={() => fetchOllamaModels(true)}
+                onClick={handleTestConnection}
               >
                 Test connection
               </Button>
@@ -1184,6 +1740,11 @@ export default function Home() {
           onInteractOutside={(event) => event.preventDefault()}
         >
           <DialogHeader>
+            <img
+              src="/logo.png"
+              alt="Multi Llama Chat logo"
+              className="h-12 w-12 object-contain mx-auto sm:mx-0 invert dark:invert-0"
+            />
             <DialogTitle>{onboardingSteps[onboardingStep].title}</DialogTitle>
             <DialogDescription>
               {onboardingSteps[onboardingStep].description}

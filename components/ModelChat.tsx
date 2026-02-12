@@ -2,7 +2,16 @@
 
 import { useEffect, useRef, ReactNode, useState } from "react";
 import { Card } from "@/components/ui/card";
-import { Loader2, MessageCircle, Copy, Check } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Loader2, MessageCircle, Copy, Check, Plus } from "lucide-react";
 
 interface Message {
   role: "user" | "assistant";
@@ -11,25 +20,47 @@ interface Message {
 
 interface ModelChatProps {
   model: string;
+  role: string;
+  roleOptions: string[];
+  onRoleChange: (role: string) => void;
+  enableRoleAssignment?: boolean;
   chat: {
     modelName: string;
     messages: Message[];
     isLoading: boolean;
   };
+  onDuplicate?: () => void;
+  disableDuplicate?: boolean;
   onRemove: () => void;
   disableRemove?: boolean;
 }
 
 export default function ModelChat({
   model,
+  role,
+  roleOptions,
+  onRoleChange,
+  enableRoleAssignment = true,
   chat,
+  onDuplicate,
+  disableDuplicate,
   onRemove,
   disableRemove,
 }: ModelChatProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [isRoleDialogOpen, setIsRoleDialogOpen] = useState(false);
+  const [roleDraft, setRoleDraft] = useState(role);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    setRoleDraft(role);
+  }, [role]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "end",
+      inline: "nearest",
+    });
   }, [chat.messages, chat.isLoading]);
 
   function CodeBlock({ code, lang }: { code: string; lang?: string }) {
@@ -155,32 +186,80 @@ export default function ModelChat({
     return <>{parts}</>;
   };
 
+  const getRoleChipClass = (value: string) => {
+    const key = value.trim().toLowerCase();
+    const palette = [
+      "bg-sky-500/15 text-sky-600 border-sky-500/30",
+      "bg-emerald-500/15 text-emerald-600 border-emerald-500/30",
+      "bg-amber-500/15 text-amber-600 border-amber-500/30",
+      "bg-violet-500/15 text-violet-600 border-violet-500/30",
+      "bg-rose-500/15 text-rose-600 border-rose-500/30",
+      "bg-cyan-500/15 text-cyan-600 border-cyan-500/30",
+    ];
+    let hash = 0;
+    for (let i = 0; i < key.length; i++) hash = (hash + key.charCodeAt(i)) % 997;
+    return palette[hash % palette.length];
+  };
+
+  const filteredRoles = roleOptions.filter((option) =>
+    option.toLowerCase().includes(roleDraft.toLowerCase()),
+  );
+
   return (
     <Card className="h-full bg-card border border-border rounded-xl shadow-sm hover:shadow-md transition-shadow overflow-hidden flex flex-col">
       {/* Header */}
       <div className="px-3 py-2 border-b border-border/70 bg-card flex items-center justify-between">
-        <div className="flex items-center gap-2 min-w-0">
+        <div className="flex items-center gap-2 min-w-0 flex-wrap">
           <span className="h-1.5 w-1.5 rounded-full bg-primary/80 shrink-0" />
           <h3 className="font-medium text-foreground text-xs truncate">{model}</h3>
+          {enableRoleAssignment && (
+            <button
+              type="button"
+              onClick={() => setIsRoleDialogOpen(true)}
+              className={`px-2 py-0.5 rounded-full border text-[10px] font-medium ${getRoleChipClass(role)}`}
+              aria-label={`Edit role for ${model}`}
+            >
+              {role}
+            </button>
+          )}
           <span className="text-[11px] text-muted-foreground shrink-0">
             {chat.messages.length} msg
           </span>
         </div>
-        <button
-          onClick={disableRemove ? undefined : onRemove}
-          className={`text-muted-foreground transition-colors p-0.5 text-xs ${
-            disableRemove
-              ? "opacity-40 cursor-not-allowed"
-              : "hover:text-foreground"
-          }`}
-          aria-label={`Remove ${model}`}
-        >
-          ✕
-        </button>
+        <div className="flex items-center gap-1.5">
+          {onDuplicate && (
+            <button
+              onClick={disableDuplicate ? undefined : onDuplicate}
+              className={`text-muted-foreground transition-colors p-0.5 relative ${
+                disableDuplicate
+                  ? "opacity-40 cursor-not-allowed"
+                  : "hover:text-foreground"
+              }`}
+              aria-label={`Duplicate ${model}`}
+              title="Duplicate chat"
+            >
+              <Copy className="w-3.5 h-3.5" />
+              <span className="absolute -right-0.5 -bottom-0.5 inline-flex h-2.5 w-2.5 items-center justify-center rounded-full bg-primary text-primary-foreground">
+                <Plus className="w-2 h-2" />
+              </span>
+            </button>
+          )}
+          <button
+            onClick={disableRemove ? undefined : onRemove}
+            className={`text-muted-foreground transition-colors p-0.5 text-xs ${
+              disableRemove
+                ? "opacity-40 cursor-not-allowed"
+                : "hover:text-foreground"
+            }`}
+            aria-label={`Remove ${model}`}
+          >
+            ✕
+          </button>
+        </div>
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto flex flex-col gap-3 p-4 bg-background">
+      <div className="slim-scrollbar flex-1 overflow-y-auto flex flex-col gap-3 p-4 bg-background">
         {chat.messages.length === 0 && !chat.isLoading ? (
           <div className="flex flex-col items-center justify-center h-full text-center py-12">
             <MessageCircle className="w-10 h-10 text-muted-foreground/30 mb-3" />
@@ -223,6 +302,70 @@ export default function ModelChat({
           </>
         )}
       </div>
+
+      <Dialog
+        open={enableRoleAssignment && isRoleDialogOpen}
+        onOpenChange={setIsRoleDialogOpen}
+      >
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Assign Role</DialogTitle>
+            <DialogDescription>
+              Choose a role for <code>{model}</code> or enter a custom one.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3">
+            <input
+              value={roleDraft}
+              onChange={(e) => setRoleDraft(e.target.value)}
+              placeholder="Type role (e.g. tester, designer, pm)"
+              className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm"
+            />
+
+            <div className="max-h-36 overflow-y-auto rounded-md border border-border p-2 flex flex-wrap gap-1.5">
+              {filteredRoles.length > 0 ? (
+                filteredRoles.map((option) => (
+                  <button
+                    key={option}
+                    type="button"
+                    onClick={() => setRoleDraft(option)}
+                    className={`px-2 py-1 rounded-full border text-xs ${
+                      roleDraft.toLowerCase() === option.toLowerCase()
+                        ? "border-primary bg-primary/10 text-primary"
+                        : "border-border text-foreground hover:bg-muted"
+                    }`}
+                  >
+                    {option}
+                  </button>
+                ))
+              ) : (
+                <p className="text-xs text-muted-foreground">No matching roles</p>
+              )}
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setRoleDraft(role);
+                setIsRoleDialogOpen(false);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                onRoleChange(roleDraft);
+                setIsRoleDialogOpen(false);
+              }}
+            >
+              Apply
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Card>
   );
 }
