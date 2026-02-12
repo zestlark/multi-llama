@@ -139,6 +139,9 @@ export default function Home() {
   const [onboardingStep, setOnboardingStep] = useState(0);
   const [showOllamaSetupAlert, setShowOllamaSetupAlert] = useState(false);
   const [didCopyInstallCommand, setDidCopyInstallCommand] = useState(false);
+  const [copiedOriginsCommandKey, setCopiedOriginsCommandKey] = useState<
+    "mac" | "powershell" | "cmd" | null
+  >(null);
   const [isHydrated, setIsHydrated] = useState(false);
   const [installPromptEvent, setInstallPromptEvent] =
     useState<BeforeInstallPromptEvent | null>(null);
@@ -200,6 +203,21 @@ export default function Home() {
   const apiBaseUrl = useMemo(
     () => normalizeOllamaBaseUrl(settings.ollamaBaseUrl),
     [settings.ollamaBaseUrl],
+  );
+  const currentOrigin =
+    typeof window !== "undefined" ? window.location.origin : "";
+  const originsValue = useMemo(() => {
+    const origins = ["http://localhost:3000"];
+    if (currentOrigin && !origins.includes(currentOrigin)) origins.push(currentOrigin);
+    return origins.join(",");
+  }, [currentOrigin]);
+  const ollamaOriginsCommands = useMemo(
+    () => ({
+      mac: `OLLAMA_ORIGINS=\"${originsValue}\" ollama serve`,
+      powershell: `$env:OLLAMA_ORIGINS=\"${originsValue}\"; ollama serve`,
+      cmd: `set OLLAMA_ORIGINS=${originsValue} && ollama serve`,
+    }),
+    [originsValue],
   );
 
   const getBaseModelName = useCallback((modelKey: string) => {
@@ -621,6 +639,22 @@ export default function Home() {
       setDidCopyInstallCommand(false);
     }
   }, []);
+
+  const copyOriginsCommand = useCallback(async (key: "mac" | "powershell" | "cmd") => {
+    try {
+      const value =
+        key === "mac"
+          ? ollamaOriginsCommands.mac
+          : key === "powershell"
+            ? ollamaOriginsCommands.powershell
+            : ollamaOriginsCommands.cmd;
+      await navigator.clipboard.writeText(value);
+      setCopiedOriginsCommandKey(key);
+      setTimeout(() => setCopiedOriginsCommandKey(null), 1500);
+    } catch {
+      setCopiedOriginsCommandKey(null);
+    }
+  }, [ollamaOriginsCommands]);
 
   const completeOnboarding = useCallback(async () => {
     localStorage.setItem(ONBOARDING_DONE_STORAGE_KEY, "true");
@@ -1854,7 +1888,63 @@ export default function Home() {
                   )}
                 </button>
               </p>
-              <p>5. If using remote server, set its URL in Settings</p>
+              <div className="space-y-1.5">
+                <p>5. Allow browser origin (run the command for your OS):</p>
+                <p className="flex items-center gap-2 flex-wrap">
+                  <span>
+                    macOS / Ubuntu / Linux:{" "}
+                    <code>{ollamaOriginsCommands.mac}</code>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => copyOriginsCommand("mac")}
+                    className="h-6 w-6 rounded border border-border inline-flex items-center justify-center hover:bg-muted transition-colors"
+                    aria-label="Copy macOS Linux command"
+                  >
+                    {copiedOriginsCommandKey === "mac" ? (
+                      <Check className="h-3.5 w-3.5" />
+                    ) : (
+                      <Copy className="h-3.5 w-3.5" />
+                    )}
+                  </button>
+                </p>
+                <p className="flex items-center gap-2 flex-wrap">
+                  <span>
+                    Windows PowerShell:{" "}
+                    <code>{ollamaOriginsCommands.powershell}</code>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => copyOriginsCommand("powershell")}
+                    className="h-6 w-6 rounded border border-border inline-flex items-center justify-center hover:bg-muted transition-colors"
+                    aria-label="Copy PowerShell command"
+                  >
+                    {copiedOriginsCommandKey === "powershell" ? (
+                      <Check className="h-3.5 w-3.5" />
+                    ) : (
+                      <Copy className="h-3.5 w-3.5" />
+                    )}
+                  </button>
+                </p>
+                <p className="flex items-center gap-2 flex-wrap">
+                  <span>
+                    Windows CMD: <code>{ollamaOriginsCommands.cmd}</code>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => copyOriginsCommand("cmd")}
+                    className="h-6 w-6 rounded border border-border inline-flex items-center justify-center hover:bg-muted transition-colors"
+                    aria-label="Copy CMD command"
+                  >
+                    {copiedOriginsCommandKey === "cmd" ? (
+                      <Check className="h-3.5 w-3.5" />
+                    ) : (
+                      <Copy className="h-3.5 w-3.5" />
+                    )}
+                  </button>
+                </p>
+              </div>
+              <p>6. If using remote server, set its URL in Settings</p>
             </div>
           </div>
 
