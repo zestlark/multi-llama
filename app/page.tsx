@@ -110,6 +110,13 @@ const normalizeOllamaBaseUrl = (raw: string) => {
     if (parsed.hostname === "localhost") {
       parsed.hostname = "127.0.0.1";
     }
+    // Guard against a common misconfiguration where app dev-server ports
+    // are entered as Ollama host.
+    const isLocalHost =
+      parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost";
+    if (isLocalHost && (parsed.port === "3000" || parsed.port === "5173")) {
+      parsed.port = "11434";
+    }
     return parsed.toString().replace(/\/+$/, "");
   } catch {
     return withProtocol.replace(/\/+$/, "");
@@ -149,9 +156,7 @@ export default function Home() {
   const [onboardingStep, setOnboardingStep] = useState(0);
   const [showOllamaSetupAlert, setShowOllamaSetupAlert] = useState(false);
   const [didCopyInstallCommand, setDidCopyInstallCommand] = useState(false);
-  const [copiedOriginsCommandKey, setCopiedOriginsCommandKey] = useState<
-    "mac" | "powershell" | "cmd" | null
-  >(null);
+  const [didCopyNetworkCommand, setDidCopyNetworkCommand] = useState(false);
   const [isHydrated, setIsHydrated] = useState(false);
   const [installPromptEvent, setInstallPromptEvent] =
     useState<BeforeInstallPromptEvent | null>(null);
@@ -214,21 +219,8 @@ export default function Home() {
     () => normalizeOllamaBaseUrl(settings.ollamaBaseUrl),
     [settings.ollamaBaseUrl],
   );
-  const currentOrigin =
-    typeof window !== "undefined" ? window.location.origin : "";
-  const originsValue = useMemo(() => {
-    const origins = ["http://localhost:3000", "http://127.0.0.1:3000"];
-    if (currentOrigin && !origins.includes(currentOrigin)) origins.push(currentOrigin);
-    return origins.join(",");
-  }, [currentOrigin]);
-  const ollamaOriginsCommands = useMemo(
-    () => ({
-      mac: `OLLAMA_ORIGINS=\"${originsValue}\" ollama serve`,
-      powershell: `$env:OLLAMA_ORIGINS=\"${originsValue}\"; ollama serve`,
-      cmd: `set OLLAMA_ORIGINS=${originsValue} && ollama serve`,
-    }),
-    [originsValue],
-  );
+  const ollamaNetworkCommand =
+    'OLLAMA_HOST=0.0.0.0:11434 OLLAMA_ORIGINS="*" ollama serve';
 
   const getBaseModelName = useCallback((modelKey: string) => {
     const idx = modelKey.indexOf(MODEL_INSTANCE_DELIMITER);
@@ -650,21 +642,15 @@ export default function Home() {
     }
   }, []);
 
-  const copyOriginsCommand = useCallback(async (key: "mac" | "powershell" | "cmd") => {
+  const copyNetworkCommand = useCallback(async () => {
     try {
-      const value =
-        key === "mac"
-          ? ollamaOriginsCommands.mac
-          : key === "powershell"
-            ? ollamaOriginsCommands.powershell
-            : ollamaOriginsCommands.cmd;
-      await navigator.clipboard.writeText(value);
-      setCopiedOriginsCommandKey(key);
-      setTimeout(() => setCopiedOriginsCommandKey(null), 1500);
+      await navigator.clipboard.writeText(ollamaNetworkCommand);
+      setDidCopyNetworkCommand(true);
+      setTimeout(() => setDidCopyNetworkCommand(false), 1500);
     } catch {
-      setCopiedOriginsCommandKey(null);
+      setDidCopyNetworkCommand(false);
     }
-  }, [ollamaOriginsCommands]);
+  }, [ollamaNetworkCommand]);
 
   const completeOnboarding = useCallback(async () => {
     localStorage.setItem(ONBOARDING_DONE_STORAGE_KEY, "true");
@@ -1866,7 +1852,7 @@ export default function Home() {
               <code className="text-sm">{apiBaseUrl || "Not configured"}</code>
             </div>
 
-            <div className="text-sm text-muted-foreground space-y-1 break-words">
+            <div className="text-xs text-muted-foreground space-y-3 break-words">
               <p className="font-medium text-foreground">Setup steps</p>
               <p>
                 1. Install Ollama:{" "}
@@ -1899,69 +1885,36 @@ export default function Home() {
                 </button>
               </p>
               <div className="space-y-1.5">
-                <p>5. Allow browser origin (run the command for your OS):</p>
-                <p className="flex items-center gap-2 flex-wrap min-w-0">
-                  <span className="min-w-0 break-all">
-                    macOS / Ubuntu / Linux:{" "}
-                    <code className="break-all whitespace-pre-wrap">
-                      {ollamaOriginsCommands.mac}
-                    </code>
-                  </span>
+                <p>5. Start Ollama for browser/network access:</p>
+                <div className="rounded-md border border-border bg-background/60 px-2.5 py-2 text-xs break-all flex items-start justify-between gap-2">
+                  <code className="break-all whitespace-pre-wrap flex-1">
+                    {ollamaNetworkCommand}
+                  </code>
                   <button
                     type="button"
-                    onClick={() => copyOriginsCommand("mac")}
-                    className="h-6 w-6 rounded border border-border inline-flex items-center justify-center hover:bg-muted transition-colors"
-                    aria-label="Copy macOS Linux command"
+                    onClick={copyNetworkCommand}
+                    className="h-6 w-6 rounded border border-border inline-flex items-center justify-center hover:bg-muted transition-colors shrink-0"
+                    aria-label="Copy network command"
                   >
-                    {copiedOriginsCommandKey === "mac" ? (
+                    {didCopyNetworkCommand ? (
                       <Check className="h-3.5 w-3.5" />
                     ) : (
                       <Copy className="h-3.5 w-3.5" />
                     )}
                   </button>
-                </p>
-                <p className="flex items-center gap-2 flex-wrap min-w-0">
-                  <span className="min-w-0 break-all">
-                    Windows PowerShell:{" "}
-                    <code className="break-all whitespace-pre-wrap">
-                      {ollamaOriginsCommands.powershell}
-                    </code>
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => copyOriginsCommand("powershell")}
-                    className="h-6 w-6 rounded border border-border inline-flex items-center justify-center hover:bg-muted transition-colors"
-                    aria-label="Copy PowerShell command"
-                  >
-                    {copiedOriginsCommandKey === "powershell" ? (
-                      <Check className="h-3.5 w-3.5" />
-                    ) : (
-                      <Copy className="h-3.5 w-3.5" />
-                    )}
-                  </button>
-                </p>
-                <p className="flex items-center gap-2 flex-wrap min-w-0">
-                  <span className="min-w-0 break-all">
-                    Windows CMD:{" "}
-                    <code className="break-all whitespace-pre-wrap">
-                      {ollamaOriginsCommands.cmd}
-                    </code>
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => copyOriginsCommand("cmd")}
-                    className="h-6 w-6 rounded border border-border inline-flex items-center justify-center hover:bg-muted transition-colors"
-                    aria-label="Copy CMD command"
-                  >
-                    {copiedOriginsCommandKey === "cmd" ? (
-                      <Check className="h-3.5 w-3.5" />
-                    ) : (
-                      <Copy className="h-3.5 w-3.5" />
-                    )}
-                  </button>
-                </p>
+                </div>
               </div>
-              <p>6. If using remote server, set its URL in Settings</p>
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                Note: <code>OLLAMA_ORIGINS=&quot;*&quot;</code> allows all browser
+                origins. You can replace <code>*</code> with specific URLs later
+                for tighter security.
+              </p>
+              <p>
+                6. In Settings, set Ollama URL to{" "}
+                <code>http://127.0.0.1:11434</code> if this app and Ollama run on
+                the same machine. Use <code>http://&lt;LAN-IP&gt;:11434</code>{" "}
+                only when connecting from another device.
+              </p>
             </div>
           </div>
 
