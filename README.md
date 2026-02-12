@@ -1,138 +1,82 @@
 # Multi Llama Chat
 
-Compare multiple Ollama models side-by-side in one interface, assign roles, target specific model instances, and run collaborative inter-model conversations.
+**Multi Llama Chat** is a local-first AI workspace to compare multiple models in parallel, assign roles, and run structured model-to-model collaboration.
 
-## Why This Project
+Instead of asking one model at a time, you can run a full team of models in one screen.
 
-Most local LLM UIs are built for one-model-at-a-time chat.
-Multi Llama Chat is built for **comparison and collaboration**:
+## What Makes It Different
 
-- Run many model chats at once
-- Duplicate model instances with different roles
-- Target specific instances (`@model#1`)
-- Use inter-model conversation mode
-- Attach text/images
-- Keep everything in-browser with local persistence
+- Side-by-side responses from multiple models in real time
+- Multiple instances of the same model (`llama (1)`, `llama (2)`, ...)
+- Role-based behavior per model instance (tester, designer, reviewer, custom)
+- Precise targeting with mentions (`@model`, `@model#1`)
+- Inter-model communication mode for chained reasoning
+- Attachment-aware prompts (text + images)
 
-## Key Features
+## How It Works
 
-- **Multi-model side-by-side chat**
-- **Same-model multi-instance mode** (e.g. multiple `llama3` instances)
-- **Per-instance roles** (tester, designer, developer, custom roles)
-- **Tag-based routing**
-  - `@llama3` -> all `llama3` instances
-  - `@llama3#1` -> first instance only
-- **Inter-model communication mode**
-- **Attachment support**
-  - `.txt` files (prompt context)
-  - images (`.jpg`, `.png`, etc. for vision models)
-- **PWA-ready** (installable)
-- **Theme toggle** (dark/light)
-- **Settings drawer** with connection testing + user preferences
-- **Local persistence** for selected models/chats/settings
-- **Slim UI + optimized chat space**
+### 1. Select models
+Pick one or more models from the chip list.
 
-## Tech Stack
+### 2. (Optional) Add model instances
+Enable same-model multi-chat and create multiple instances of the same model.
 
-- Next.js (App Router)
-- React + TypeScript
-- Tailwind CSS + shadcn/ui
-- Lucide icons
-- Sonner toasts
+### 3. Assign roles
+Set each instance role from the role chip in card header.
+
+### 4. Send one prompt, get parallel answers
+Your input is dispatched to selected model instances simultaneously.
+
+### 5. Target exactly who should answer
+- `@qwen:4b` -> all qwen instances
+- `@qwen:4b#1` -> only first qwen instance
+
+### 6. Run inter-model communication
+Turn on inter-mode so models continue exchanging outputs round-by-round.
+
+### 7. Duplicate any chat instance
+Clone a specific model chat (messages + role) to branch exploration safely.
+
+## Core Capabilities
+
+- Multi-model comparison UI
+- Role-driven response style
+- Mention routing with instance targeting
+- Same-model multi-instance orchestration
+- Instance-level chat duplication
+- Text/image attachments in prompt flow
+- Local persistence for chat + settings
+- Dark/light mode and compact workspace UI
+
+## Ideal Use Cases
+
+- Prompt A/B testing across models
+- Reviewer/tester/designer role simulation
+- Fast requirement critique from multiple viewpoints
+- Local research with private context
+- Consensus and disagreement analysis between models
+
+## Product Experience
+
+- Compact model cards with focused chat area
+- Clean bottom composer with tagging + attachments
+- Smart mention popover (`@` suggestions)
+- Non-blocking input while responses are running
+- Toast feedback for connection actions
 
 ## Quick Start
 
-### 1. Clone and install
-
 ```bash
-git clone <your-repo-url>
-cd MULTI_MODEL_CHAT
 npm install
-```
-
-### 2. Start Ollama
-
-Make sure Ollama is running locally:
-
-```bash
-ollama serve
-```
-
-Pull at least one model:
-
-```bash
-ollama pull llama3.2
-```
-
-### 3. Run app
-
-```bash
 npm run dev
 ```
 
-Open `http://localhost:3000`.
+Then open `http://localhost:3000`, connect to your Ollama URL in Settings, select models, and start comparing.
 
-## Configuration
+## Vision
 
-Use **Settings** in the app to configure:
-
-- Ollama host URL (default `http://localhost:11434`)
-- Local persistence on/off
-- Role assignment on/off
-- Same-model multi-chat on/off
-
-## Deploy to GitHub Pages
-
-This repo is configured for static export + GitHub Pages workflow.
-
-### Included
-
-- `next.config.mjs` with static export settings
-- `.github/workflows/deploy-pages.yml` to build/deploy `out/`
-
-### Required in GitHub
-
-Go to:
-
-- `Settings` -> `Pages` -> `Build and deployment`
-- Set **Source** to **GitHub Actions**
-
-### Important Runtime Note
-
-The app calls Ollama from the browser.
-For hosted usage, users must have a reachable Ollama endpoint and proper CORS/private-network permissions if using localhost.
-
-## Usage Tips
-
-- Select models from chips at the bottom
-- Use `+` inside selected chip to add same-model instance
-- Click duplicate icon on a model card to clone that chat instance
-- Assign roles by clicking role chip in model header
-- Use mentions in input:
-  - `@qwen:4b`
-  - `@qwen:4b#2`
-
-## Roadmap Ideas
-
-- Export/import chats
-- Better model capability detection (vision/text)
-- Prompt templates per role
-- Keyboard command palette
-- Shareable conversation snapshots
-
-## Contributing
-
-PRs and issues are welcome.
-If you add a feature, include:
-
-- short before/after behavior note
-- screenshots or short gif
-- test notes
-
-## License
-
-Choose a license and add `LICENSE` file (MIT is common for OSS).
+Build a serious local AI collaboration tool where one user can coordinate a panel of specialized model agents as if they were a small product team.
 
 ---
 
-If this project helps you, consider starring the repo.
+If you find this useful, star the repo and share your workflow.
