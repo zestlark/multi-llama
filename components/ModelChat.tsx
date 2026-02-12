@@ -158,22 +158,17 @@ export default function ModelChat({
   return (
     <Card className="h-full bg-card border border-border rounded-xl shadow-sm hover:shadow-md transition-shadow overflow-hidden flex flex-col">
       {/* Header */}
-      <div className="px-6 py-4 border-b border-border bg-gradient-to-r from-card to-card/80 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center">
-            <MessageCircle className="w-4 h-4 text-primary" />
-          </div>
-          <div className="flex flex-col">
-            <h3 className="font-semibold text-foreground text-sm">{model}</h3>
-            <p className="text-xs text-muted-foreground">
-              {chat.messages.length} message
-              {chat.messages.length !== 1 ? "s" : ""}
-            </p>
-          </div>
+      <div className="px-3 py-2 border-b border-border/70 bg-card flex items-center justify-between">
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="h-1.5 w-1.5 rounded-full bg-primary/80 shrink-0" />
+          <h3 className="font-medium text-foreground text-xs truncate">{model}</h3>
+          <span className="text-[11px] text-muted-foreground shrink-0">
+            {chat.messages.length} msg
+          </span>
         </div>
         <button
           onClick={disableRemove ? undefined : onRemove}
-          className={`text-muted-foreground transition-colors p-1 ${
+          className={`text-muted-foreground transition-colors p-0.5 text-xs ${
             disableRemove
               ? "opacity-40 cursor-not-allowed"
               : "hover:text-foreground"
@@ -185,7 +180,7 @@ export default function ModelChat({
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto flex flex-col gap-4 p-6 bg-background">
+      <div className="flex-1 overflow-y-auto flex flex-col gap-3 p-4 bg-background">
         {chat.messages.length === 0 && !chat.isLoading ? (
           <div className="flex flex-col items-center justify-center h-full text-center py-12">
             <MessageCircle className="w-10 h-10 text-muted-foreground/30 mb-3" />
