@@ -1856,7 +1856,7 @@ export default function Home() {
               <code className="text-sm">{apiBaseUrl || "Not configured"}</code>
             </div>
 
-            <div className="text-sm text-muted-foreground space-y-1">
+            <div className="text-sm text-muted-foreground space-y-1 break-words">
               <p className="font-medium text-foreground">Setup steps</p>
               <p>
                 1. Install Ollama:{" "}
@@ -1871,7 +1871,7 @@ export default function Home() {
               </p>
               <p>2. Open the Ollama app if it is already installed</p>
               <p>3. Start Ollama on your machine</p>
-              <p className="flex items-center gap-2 flex-wrap">
+              <p className="flex items-center gap-2 flex-wrap min-w-0">
                 <span>
                   4. Pull a model: <code>ollama pull llama3.2</code>
                 </span>
@@ -1890,10 +1890,12 @@ export default function Home() {
               </p>
               <div className="space-y-1.5">
                 <p>5. Allow browser origin (run the command for your OS):</p>
-                <p className="flex items-center gap-2 flex-wrap">
-                  <span>
+                <p className="flex items-center gap-2 flex-wrap min-w-0">
+                  <span className="min-w-0 break-all">
                     macOS / Ubuntu / Linux:{" "}
-                    <code>{ollamaOriginsCommands.mac}</code>
+                    <code className="break-all whitespace-pre-wrap">
+                      {ollamaOriginsCommands.mac}
+                    </code>
                   </span>
                   <button
                     type="button"
@@ -1908,10 +1910,12 @@ export default function Home() {
                     )}
                   </button>
                 </p>
-                <p className="flex items-center gap-2 flex-wrap">
-                  <span>
+                <p className="flex items-center gap-2 flex-wrap min-w-0">
+                  <span className="min-w-0 break-all">
                     Windows PowerShell:{" "}
-                    <code>{ollamaOriginsCommands.powershell}</code>
+                    <code className="break-all whitespace-pre-wrap">
+                      {ollamaOriginsCommands.powershell}
+                    </code>
                   </span>
                   <button
                     type="button"
@@ -1926,9 +1930,12 @@ export default function Home() {
                     )}
                   </button>
                 </p>
-                <p className="flex items-center gap-2 flex-wrap">
-                  <span>
-                    Windows CMD: <code>{ollamaOriginsCommands.cmd}</code>
+                <p className="flex items-center gap-2 flex-wrap min-w-0">
+                  <span className="min-w-0 break-all">
+                    Windows CMD:{" "}
+                    <code className="break-all whitespace-pre-wrap">
+                      {ollamaOriginsCommands.cmd}
+                    </code>
                   </span>
                   <button
                     type="button"
