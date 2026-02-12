@@ -8,19 +8,20 @@ import './globals.css'
 
 const _geist = Geist({ subsets: ['latin'] })
 const _geistMono = Geist_Mono({ subsets: ['latin'] })
+const PUBLIC_BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH || ''
 
 export const metadata: Metadata = {
   title: 'Multi Llama Chat',
   description: 'Chat with multiple AI models simultaneously',
   generator: 'v0.app',
-  manifest: '/manifest.webmanifest',
+  manifest: `${PUBLIC_BASE_PATH}/manifest.webmanifest`,
   icons: {
     icon: [
-      { url: '/icon-192.png', sizes: '192x192', type: 'image/png' },
-      { url: '/icon-512.png', sizes: '512x512', type: 'image/png' },
+      { url: `${PUBLIC_BASE_PATH}/icon-192.png`, sizes: '192x192', type: 'image/png' },
+      { url: `${PUBLIC_BASE_PATH}/icon-512.png`, sizes: '512x512', type: 'image/png' },
     ],
-    apple: '/icon-192.png',
-    shortcut: '/icon-192.png',
+    apple: `${PUBLIC_BASE_PATH}/icon-192.png`,
+    shortcut: `${PUBLIC_BASE_PATH}/icon-192.png`,
   },
 }
 

@@ -109,6 +109,7 @@ const normalizeOllamaBaseUrl = (raw: string) => {
 const SETTINGS_STORAGE_KEY = "multi_llama_settings_v1";
 const CHAT_STATE_STORAGE_KEY = "multi_llama_chat_state_v1";
 const ONBOARDING_DONE_STORAGE_KEY = "multi_llama_onboarding_done_v1";
+const PUBLIC_BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH || "";
 const DEFAULT_ROLE = "general";
 const MODEL_INSTANCE_DELIMITER = "::instance::";
 const BUILT_IN_ROLES = [
@@ -557,7 +558,7 @@ export default function Home() {
 
     const registerServiceWorker = () => {
       navigator.serviceWorker
-        .register("/sw.js")
+        .register(`${PUBLIC_BASE_PATH}/sw.js`)
         .catch((error) =>
           console.error("[v0] Failed to register service worker:", error),
         );
@@ -1214,7 +1215,7 @@ export default function Home() {
         <div className="max-w-7xl mx-auto px-6 py-2 flex items-center justify-between">
           <div className="flex items-center gap-2">
               <img
-                src="/logo.png"
+                src={`${PUBLIC_BASE_PATH}/logo.png`}
                 alt="Multi Llama Chat logo"
                 className="h-5 w-5 object-contain invert dark:invert-0"
               />
@@ -1301,7 +1302,7 @@ export default function Home() {
           <div className="flex-1 flex items-center justify-center">
             <div className="text-center">
               <img
-                src="/logo.png"
+                src={`${PUBLIC_BASE_PATH}/logo.png`}
                 alt="Multi Llama Chat logo"
                 className="h-20 w-20 object-contain mx-auto mb-3 invert dark:invert-0"
               />
@@ -1741,7 +1742,7 @@ export default function Home() {
         >
           <DialogHeader>
             <img
-              src="/logo.png"
+              src={`${PUBLIC_BASE_PATH}/logo.png`}
               alt="Multi Llama Chat logo"
               className="h-12 w-12 object-contain mx-auto sm:mx-0 invert dark:invert-0"
             />

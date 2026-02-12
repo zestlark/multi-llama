@@ -1,5 +1,12 @@
 const CACHE_NAME = "multi-llama-chat-v1";
-const APP_SHELL = ["/", "/manifest.webmanifest", "/placeholder.svg", "/placeholder-logo.svg"];
+const SCOPE_PATH = new URL(self.registration.scope).pathname.replace(/\/$/, "");
+const scoped = (path) => `${SCOPE_PATH}${path}`;
+const APP_SHELL = [
+  scoped("/"),
+  scoped("/manifest.webmanifest"),
+  scoped("/placeholder.svg"),
+  scoped("/placeholder-logo.svg"),
+];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -21,7 +28,7 @@ self.addEventListener("fetch", (event) => {
 
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return;
-  if (url.pathname.startsWith("/_next/")) return;
+  if (url.pathname.includes("/_next/")) return;
 
   if (event.request.mode === "navigate") {
     event.respondWith(
@@ -34,7 +41,7 @@ self.addEventListener("fetch", (event) => {
         .catch(async () => {
           return (
             (await caches.match(event.request)) ||
-            (await caches.match("/")) ||
+            (await caches.match(scoped("/"))) ||
             new Response("Offline", { status: 503, statusText: "Offline" })
           );
         }),
@@ -54,7 +61,7 @@ self.addEventListener("fetch", (event) => {
           caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
           return response;
         })
-        .catch(() => caches.match("/"));
+        .catch(() => caches.match(scoped("/")));
     }),
   );
 });
