@@ -103,7 +103,17 @@ const normalizeOllamaBaseUrl = (raw: string) => {
   const withProtocol = /^https?:\/\//i.test(trimmed)
     ? trimmed
     : `http://${trimmed}`;
-  return withProtocol.replace(/\/+$/, "");
+  try {
+    const parsed = new URL(withProtocol);
+    // Hosted browser access to local Ollama is more reliable with 127.0.0.1
+    // than localhost on some systems/policies.
+    if (parsed.hostname === "localhost") {
+      parsed.hostname = "127.0.0.1";
+    }
+    return parsed.toString().replace(/\/+$/, "");
+  } catch {
+    return withProtocol.replace(/\/+$/, "");
+  }
 };
 
 const SETTINGS_STORAGE_KEY = "multi_llama_settings_v1";
@@ -123,7 +133,7 @@ const BUILT_IN_ROLES = [
   "analyst",
 ];
 const DEFAULT_SETTINGS: UserSettings = {
-  ollamaBaseUrl: "http://localhost:11434",
+  ollamaBaseUrl: "http://127.0.0.1:11434",
   persistDataLocally: true,
   enableRoles: true,
   allowSameModelMultiChat: false,
@@ -207,7 +217,7 @@ export default function Home() {
   const currentOrigin =
     typeof window !== "undefined" ? window.location.origin : "";
   const originsValue = useMemo(() => {
-    const origins = ["http://localhost:3000"];
+    const origins = ["http://localhost:3000", "http://127.0.0.1:3000"];
     if (currentOrigin && !origins.includes(currentOrigin)) origins.push(currentOrigin);
     return origins.join(",");
   }, [currentOrigin]);
@@ -1672,7 +1682,7 @@ export default function Home() {
                       DEFAULT_SETTINGS.ollamaBaseUrl,
                   }))
                 }
-                placeholder="http://localhost:11434"
+                placeholder="http://127.0.0.1:11434"
                 className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm"
               />
               <p className="text-[11px] text-muted-foreground inline-flex items-center gap-1.5">
