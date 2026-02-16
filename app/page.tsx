@@ -5,38 +5,12 @@ import React from "react";
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { Switch } from "@/components/ui/switch";
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
 import { useTheme } from "next-themes";
 import { toast } from "sonner";
 import {
@@ -44,19 +18,22 @@ import {
   Loader2,
   MessagesSquare,
   Settings2,
-  Download,
-  Trash2,
-  Copy,
-  Check,
   Sun,
   Moon,
-  AlertTriangle,
   Paperclip,
   X,
   FileText,
   Image as ImageIcon,
 } from "lucide-react";
 import ModelChat from "@/components/ModelChat";
+import SettingsDrawer from "@/components/SettingsDrawer";
+import OnboardingDialog from "@/components/OnboardingDialog";
+import OllamaSetupAlertDialog from "@/components/OllamaSetupAlertDialog";
+import {
+  applyOutputLengthLimit,
+  buildPromptWithChatConfiguration,
+  normalizeChatConfiguration,
+} from "@/lib/chat-config";
 
 interface Message {
   role: "user" | "assistant";
@@ -70,10 +47,23 @@ interface ModelChatData {
 }
 
 interface UserSettings {
-  ollamaBaseUrl: string;
+  hosts: Array<{ id: string; url: string }>;
   persistDataLocally: boolean;
   enableRoles: boolean;
   allowSameModelMultiChat: boolean;
+  chatConfigEnabled: boolean;
+  chatConfigPrePrompt: string;
+  chatConfigPostPrompt: string;
+  chatConfigMaxOutputLength: number | null;
+}
+
+type HostConnectionStatus = "idle" | "testing" | "connected" | "failed";
+
+interface AvailableModelOption {
+  hostId: string;
+  hostUrl: string;
+  modelName: string;
+  modelRef: string;
 }
 
 interface PersistedChatState {
@@ -95,6 +85,12 @@ interface Attachment {
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>;
   userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
+}
+
+interface OllamaChatMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
+  images?: string[];
 }
 
 const normalizeOllamaBaseUrl = (raw: string) => {
@@ -129,6 +125,7 @@ const ONBOARDING_DONE_STORAGE_KEY = "multi_llama_onboarding_done_v1";
 const PUBLIC_BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH || "";
 const DEFAULT_ROLE = "general";
 const MODEL_INSTANCE_DELIMITER = "::instance::";
+const MODEL_REF_DELIMITER = "::host_model::";
 const BUILT_IN_ROLES = [
   "general",
   "tester",
@@ -140,16 +137,25 @@ const BUILT_IN_ROLES = [
   "analyst",
 ];
 const DEFAULT_SETTINGS: UserSettings = {
-  ollamaBaseUrl: "http://127.0.0.1:11434",
+  hosts: [{ id: "host-local", url: "http://127.0.0.1:11434" }],
   persistDataLocally: true,
   enableRoles: true,
-  allowSameModelMultiChat: false,
+  allowSameModelMultiChat: true,
+  chatConfigEnabled: false,
+  chatConfigPrePrompt: "",
+  chatConfigPostPrompt: "",
+  chatConfigMaxOutputLength: null,
 };
 
 export default function Home() {
   const { resolvedTheme, setTheme } = useTheme();
   const [isThemeReady, setIsThemeReady] = useState(false);
-  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [availableModels, setAvailableModels] = useState<AvailableModelOption[]>(
+    [],
+  );
+  const [hostStatuses, setHostStatuses] = useState<
+    Record<string, HostConnectionStatus>
+  >({});
   const [settings, setSettings] = useState<UserSettings>(DEFAULT_SETTINGS);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
@@ -215,20 +221,60 @@ export default function Home() {
     [],
   );
 
-  const apiBaseUrl = useMemo(
-    () => normalizeOllamaBaseUrl(settings.ollamaBaseUrl),
-    [settings.ollamaBaseUrl],
+  const normalizedHosts = useMemo(
+    () =>
+      settings.hosts.map((host) => ({
+        ...host,
+        url: normalizeOllamaBaseUrl(host.url),
+      })),
+    [settings.hosts],
   );
+  const apiBaseUrl = normalizedHosts[0]?.url || "";
   const ollamaNetworkCommand =
     'OLLAMA_HOST=0.0.0.0:11434 OLLAMA_ORIGINS="*" ollama serve';
 
-  const getBaseModelName = useCallback((modelKey: string) => {
+  const getBaseModelRef = useCallback((modelKey: string) => {
     const idx = modelKey.indexOf(MODEL_INSTANCE_DELIMITER);
     return idx === -1 ? modelKey : modelKey.slice(0, idx);
   }, []);
 
-  const createModelInstanceKey = useCallback((modelName: string) => {
-    return `${modelName}${MODEL_INSTANCE_DELIMITER}${Date.now()}-${Math.random()
+  const createModelRef = useCallback((hostId: string, modelName: string) => {
+    return `${hostId}${MODEL_REF_DELIMITER}${modelName}`;
+  }, []);
+
+  const parseModelRef = useCallback(
+    (modelRef: string) => {
+      const idx = modelRef.indexOf(MODEL_REF_DELIMITER);
+      if (idx === -1) return { hostId: "", modelName: modelRef };
+      return {
+        hostId: modelRef.slice(0, idx),
+        modelName: modelRef.slice(idx + MODEL_REF_DELIMITER.length),
+      };
+    },
+    [],
+  );
+
+  const getBaseModelName = useCallback(
+    (modelKey: string) => {
+      const { modelName } = parseModelRef(getBaseModelRef(modelKey));
+      return modelName;
+    },
+    [getBaseModelRef, parseModelRef],
+  );
+
+  const getHostIdFromModelKey = useCallback(
+    (modelKey: string) => parseModelRef(getBaseModelRef(modelKey)).hostId,
+    [getBaseModelRef, parseModelRef],
+  );
+
+  const getHostUrlById = useCallback(
+    (hostId: string) =>
+      normalizedHosts.find((host) => host.id === hostId)?.url || "",
+    [normalizedHosts],
+  );
+
+  const createModelInstanceKey = useCallback((modelRef: string) => {
+    return `${modelRef}${MODEL_INSTANCE_DELIMITER}${Date.now()}-${Math.random()
       .toString(36)
       .slice(2, 8)}`;
   }, []);
@@ -283,13 +329,87 @@ export default function Home() {
 
   const buildPromptForModel = useCallback(
     (model: string, prompt: string) => {
-      if (!settings.enableRoles) return prompt;
+      let built = prompt;
+      if (!settings.enableRoles) {
+        return buildPromptWithChatConfiguration(
+          built,
+          normalizeChatConfiguration({
+            enabled: settings.chatConfigEnabled,
+            prePrompt: settings.chatConfigPrePrompt,
+            postPrompt: settings.chatConfigPostPrompt,
+            maxOutputLength: settings.chatConfigMaxOutputLength,
+          }),
+        );
+      }
       const role = (modelRoles[model] || DEFAULT_ROLE).trim().toLowerCase();
-      if (!role || role === DEFAULT_ROLE) return prompt;
-      return `Role: ${role}\nInstructions: You must answer as a ${role} and stay consistent with this role.\n\n${prompt}`;
+      if (role && role !== DEFAULT_ROLE) {
+        built = `Role: ${role}\nInstructions: You must answer as a ${role} and stay consistent with this role.\n\n${built}`;
+      }
+      return buildPromptWithChatConfiguration(
+        built,
+        normalizeChatConfiguration({
+          enabled: settings.chatConfigEnabled,
+          prePrompt: settings.chatConfigPrePrompt,
+          postPrompt: settings.chatConfigPostPrompt,
+          maxOutputLength: settings.chatConfigMaxOutputLength,
+        }),
+      );
     },
-    [modelRoles, settings.enableRoles],
+    [
+      modelRoles,
+      settings.enableRoles,
+      settings.chatConfigEnabled,
+      settings.chatConfigPrePrompt,
+      settings.chatConfigPostPrompt,
+      settings.chatConfigMaxOutputLength,
+    ],
   );
+
+  const buildSystemMessageForModel = useCallback(
+    (modelKey: string): OllamaChatMessage | null => {
+      const systemParts: string[] = [];
+      if (settings.enableRoles) {
+        const role = (modelRoles[modelKey] || DEFAULT_ROLE).trim().toLowerCase();
+        if (role && role !== DEFAULT_ROLE) {
+          systemParts.push(
+            `You are participating as a ${role}. Stay consistent with this role.`,
+          );
+        }
+      }
+
+      if (settings.chatConfigEnabled) {
+        const pre = settings.chatConfigPrePrompt.trim();
+        const post = settings.chatConfigPostPrompt.trim();
+        if (pre) systemParts.push(`Pre instruction: ${pre}`);
+        if (post) systemParts.push(`Post instruction: ${post}`);
+        if (settings.chatConfigMaxOutputLength && settings.chatConfigMaxOutputLength > 0) {
+          systemParts.push(
+            `Keep each response under ${settings.chatConfigMaxOutputLength} characters.`,
+          );
+        }
+      }
+
+      if (systemParts.length === 0) return null;
+      return { role: "system", content: systemParts.join("\n\n") };
+    },
+    [
+      modelRoles,
+      settings.enableRoles,
+      settings.chatConfigEnabled,
+      settings.chatConfigPrePrompt,
+      settings.chatConfigPostPrompt,
+      settings.chatConfigMaxOutputLength,
+    ],
+  );
+
+  const convertUiMessagesToOllama = useCallback((messages: Message[]): OllamaChatMessage[] => {
+    return messages
+      .filter((message) => message.role === "user" || message.role === "assistant")
+      .map((message) => ({
+        role: message.role,
+        content: message.content,
+      }));
+  }, []);
 
   const readFileAsText = (file: File) =>
     new Promise<string>((resolve, reject) => {
@@ -380,94 +500,98 @@ export default function Home() {
     [selectedModels],
   );
 
-  const fetchOllamaModels = useCallback(
+  const fetchModelsFromHost = useCallback(
+    async (hostId: string, hostUrl: string) => {
+      const response = await fetch(`${hostUrl}/api/tags`);
+      if (!response.ok) throw new Error("Failed to fetch models");
+      const data = await response.json();
+      const modelNames: string[] = data.models?.map((m: any) => m.name) || [];
+      return modelNames.map((modelName) => ({
+        hostId,
+        hostUrl,
+        modelName,
+        modelRef: createModelRef(hostId, modelName),
+      }));
+    },
+    [createModelRef],
+  );
+
+  const fetchAllHostModels = useCallback(
     async (showSetupAlertOnFailure: boolean) => {
-      if (!apiBaseUrl) {
+      const validHosts = normalizedHosts.filter((host) => !!host.url);
+      if (validHosts.length === 0) {
         setAvailableModels([]);
-        setOllamaError("Set a valid Ollama host URL in Settings.");
+        setOllamaError("Set at least one valid Ollama host URL in Settings.");
         if (showSetupAlertOnFailure) setShowOllamaSetupAlert(true);
         return false;
       }
 
-      try {
-        const response = await fetch(`${apiBaseUrl}/api/tags`);
-        if (!response.ok) throw new Error("Failed to fetch models");
-        const data = await response.json();
-        const modelNames = data.models?.map((m: any) => m.name) || [];
-        setAvailableModels(modelNames);
+      const allModels: AvailableModelOption[] = [];
+      let connectedCount = 0;
+
+      for (const host of validHosts) {
+        try {
+          const models = await fetchModelsFromHost(host.id, host.url);
+          allModels.push(...models);
+          connectedCount += 1;
+          setHostStatuses((prev) => ({ ...prev, [host.id]: "connected" }));
+        } catch (error) {
+          console.error(`[v0] Error fetching models for host ${host.url}:`, error);
+          setHostStatuses((prev) => ({ ...prev, [host.id]: "failed" }));
+        }
+      }
+
+      setAvailableModels(allModels);
+      if (connectedCount > 0) {
         setOllamaError("");
         return true;
-      } catch (error) {
-        console.error("[v0] Error fetching models:", error);
-        setAvailableModels([]);
-        setOllamaError(
-          `Could not connect to Ollama at ${apiBaseUrl}. Check host and ensure Ollama is running.`,
-        );
-        if (showSetupAlertOnFailure) setShowOllamaSetupAlert(true);
-        return false;
       }
+
+      setOllamaError(
+        "Could not connect to any configured Ollama host. Check Settings and ensure Ollama is running.",
+      );
+      if (showSetupAlertOnFailure) setShowOllamaSetupAlert(true);
+      return false;
     },
-    [apiBaseUrl],
+    [normalizedHosts, fetchModelsFromHost],
   );
 
   const generateWithOllama = useCallback(
-    async (model: string, prompt: string, imageBase64List: string[] = []) => {
-      const request = async (
-        endpoint: "generate" | "chat",
-        body: Record<string, unknown>,
-      ) => {
-        const response = await fetch(`${apiBaseUrl}/api/${endpoint}`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(body),
-        });
+    async (
+      hostUrl: string,
+      model: string,
+      messages: OllamaChatMessage[],
+    ) => {
+      const response = await fetch(`${hostUrl}/api/chat`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: model.trim(),
+          messages,
+          stream: false,
+        }),
+      });
 
-        const raw = await response.text();
-        let data: any = {};
-        try {
-          data = raw ? JSON.parse(raw) : {};
-        } catch {
-          data = { error: raw };
-        }
-
-        if (!response.ok) {
-          const reason = data?.error || data?.message || `HTTP ${response.status}`;
-          throw new Error(`${reason} [${apiBaseUrl}/api/${endpoint}]`);
-        }
-
-        return data;
-      };
-
+      const raw = await response.text();
+      let data: any = {};
       try {
-        const data = await request("generate", {
-          model: model.trim(),
-          prompt,
-          ...(imageBase64List.length > 0 ? { images: imageBase64List } : {}),
-          stream: false,
-        });
-        return typeof data.response === "string"
-          ? data.response
-          : String(data.response || "");
+        data = raw ? JSON.parse(raw) : {};
       } catch {
-        const data = await request("chat", {
-          model: model.trim(),
-          messages: [
-            {
-              role: "user",
-              content: prompt,
-              ...(imageBase64List.length > 0 ? { images: imageBase64List } : {}),
-            },
-          ],
-          stream: false,
-        });
-        return typeof data?.message?.content === "string"
-          ? data.message.content
-          : String(data?.message?.content || "");
+        data = { error: raw };
       }
+
+      if (!response.ok) {
+        const reason = data?.error || data?.message || `HTTP ${response.status}`;
+        throw new Error(`${reason} [${hostUrl}/api/chat]`);
+      }
+
+      return typeof data?.message?.content === "string"
+        ? data.message.content
+        : String(data?.message?.content || "");
     },
-    [apiBaseUrl],
+    [],
   );
 
   useEffect(() => {
@@ -475,12 +599,33 @@ export default function Home() {
       const rawSettings = localStorage.getItem(SETTINGS_STORAGE_KEY);
       if (rawSettings) {
         const parsed = JSON.parse(rawSettings) as Partial<UserSettings>;
+        const parsedHosts =
+          Array.isArray((parsed as any).hosts) &&
+          (parsed as any).hosts.length > 0
+            ? (parsed as any).hosts
+                .filter(
+                  (host: any) =>
+                    host &&
+                    typeof host.id === "string" &&
+                    typeof host.url === "string",
+                )
+                .map((host: any) => ({
+                  id: host.id,
+                  url: normalizeOllamaBaseUrl(host.url),
+                }))
+            : [];
+        const legacyHost =
+          typeof (parsed as any).ollamaBaseUrl === "string"
+            ? normalizeOllamaBaseUrl((parsed as any).ollamaBaseUrl)
+            : "";
+        const hosts =
+          parsedHosts.length > 0
+            ? parsedHosts
+            : legacyHost
+              ? [{ id: "host-local", url: legacyHost }]
+              : DEFAULT_SETTINGS.hosts;
         setSettings({
-          ollamaBaseUrl:
-            typeof parsed.ollamaBaseUrl === "string" &&
-            normalizeOllamaBaseUrl(parsed.ollamaBaseUrl)
-              ? normalizeOllamaBaseUrl(parsed.ollamaBaseUrl)
-              : DEFAULT_SETTINGS.ollamaBaseUrl,
+          hosts,
           persistDataLocally:
             typeof parsed.persistDataLocally === "boolean"
               ? parsed.persistDataLocally
@@ -493,6 +638,24 @@ export default function Home() {
             typeof parsed.allowSameModelMultiChat === "boolean"
               ? parsed.allowSameModelMultiChat
               : DEFAULT_SETTINGS.allowSameModelMultiChat,
+          chatConfigEnabled:
+            typeof parsed.chatConfigEnabled === "boolean"
+              ? parsed.chatConfigEnabled
+              : DEFAULT_SETTINGS.chatConfigEnabled,
+          chatConfigPrePrompt:
+            typeof parsed.chatConfigPrePrompt === "string"
+              ? parsed.chatConfigPrePrompt
+              : DEFAULT_SETTINGS.chatConfigPrePrompt,
+          chatConfigPostPrompt:
+            typeof parsed.chatConfigPostPrompt === "string"
+              ? parsed.chatConfigPostPrompt
+              : DEFAULT_SETTINGS.chatConfigPostPrompt,
+          chatConfigMaxOutputLength:
+            typeof parsed.chatConfigMaxOutputLength === "number" &&
+            Number.isFinite(parsed.chatConfigMaxOutputLength) &&
+            parsed.chatConfigMaxOutputLength > 0
+              ? Math.floor(parsed.chatConfigMaxOutputLength)
+              : DEFAULT_SETTINGS.chatConfigMaxOutputLength,
         });
       }
 
@@ -652,29 +815,92 @@ export default function Home() {
     }
   }, [ollamaNetworkCommand]);
 
+  const addHost = useCallback(() => {
+    setSettings((prev) => ({
+      ...prev,
+      hosts: [
+        ...prev.hosts,
+        {
+          id: `host-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          url: "",
+        },
+      ],
+    }));
+  }, []);
+
+  const removeHost = useCallback((hostId: string) => {
+    setSettings((prev) => {
+      const nextHosts = prev.hosts.filter((host) => host.id !== hostId);
+      return {
+        ...prev,
+        hosts: nextHosts.length > 0 ? nextHosts : prev.hosts,
+      };
+    });
+    setHostStatuses((prev) => {
+      const next = { ...prev };
+      delete next[hostId];
+      return next;
+    });
+    setAvailableModels((prev) => prev.filter((model) => model.hostId !== hostId));
+    setSelectedModels((prev) =>
+      prev.filter((modelKey) => getHostIdFromModelKey(modelKey) !== hostId),
+    );
+    setModelChats((prev) => {
+      const next: Record<string, ModelChatData> = {};
+      Object.keys(prev).forEach((key) => {
+        if (getHostIdFromModelKey(key) !== hostId) next[key] = prev[key];
+      });
+      return next;
+    });
+    setModelRoles((prev) => {
+      const next: Record<string, string> = {};
+      Object.keys(prev).forEach((key) => {
+        if (getHostIdFromModelKey(key) !== hostId) next[key] = prev[key];
+      });
+      return next;
+    });
+  }, [getHostIdFromModelKey]);
+
+  const testHostConnection = useCallback(
+    async (hostId: string) => {
+      const host = normalizedHosts.find((item) => item.id === hostId);
+      if (!host || !host.url) {
+        setHostStatuses((prev) => ({ ...prev, [hostId]: "failed" }));
+        toast.error("Set a valid host URL before testing.");
+        return;
+      }
+
+      setHostStatuses((prev) => ({ ...prev, [hostId]: "testing" }));
+      const toastId = toast.loading(`Testing ${host.url}...`);
+      try {
+        const models = await fetchModelsFromHost(host.id, host.url);
+        setHostStatuses((prev) => ({ ...prev, [host.id]: "connected" }));
+        setAvailableModels((prev) => {
+          const withoutHost = prev.filter((model) => model.hostId !== host.id);
+          return [...withoutHost, ...models];
+        });
+        setOllamaError("");
+        toast.success(`Connected: ${host.url}`, { id: toastId });
+      } catch {
+        setHostStatuses((prev) => ({ ...prev, [host.id]: "failed" }));
+        setAvailableModels((prev) => prev.filter((model) => model.hostId !== host.id));
+        toast.error(`Failed: ${host.url}`, { id: toastId });
+      }
+    },
+    [normalizedHosts, fetchModelsFromHost],
+  );
+
   const completeOnboarding = useCallback(async () => {
     localStorage.setItem(ONBOARDING_DONE_STORAGE_KEY, "true");
     setIsOnboardingOpen(false);
     setOnboardingStep(0);
-    await fetchOllamaModels(true);
-  }, [fetchOllamaModels]);
-
-  const handleTestConnection = useCallback(async () => {
-    const toastId = toast.loading("Testing Ollama connection...");
-    const ok = await fetchOllamaModels(false);
-    if (ok) {
-      toast.success("Connected to Ollama successfully.", { id: toastId });
-      return;
-    }
-    toast.error(`Unable to connect to ${apiBaseUrl || "configured host"}.`, {
-      id: toastId,
-    });
-  }, [fetchOllamaModels, apiBaseUrl]);
+    await fetchAllHostModels(true);
+  }, [fetchAllHostModels]);
 
   // Keep model list synced with current Ollama URL
   useEffect(() => {
-    fetchOllamaModels(false);
-  }, [fetchOllamaModels]);
+    fetchAllHostModels(false);
+  }, [fetchAllHostModels]);
 
   useEffect(() => {
     interChatActiveRef.current = isInterModelChatActive;
@@ -695,8 +921,9 @@ export default function Home() {
   }, []);
 
   const addModelInstance = useCallback(
-    (modelName: string) => {
-      const modelKey = createModelInstanceKey(modelName);
+    (modelRef: string) => {
+      const modelKey = createModelInstanceKey(modelRef);
+      const { modelName } = parseModelRef(modelRef);
       setSelectedModels((prev) => [...prev, modelKey]);
       setModelChats((prev) => ({
         ...prev,
@@ -711,21 +938,22 @@ export default function Home() {
         [modelKey]: prev[modelKey] || DEFAULT_ROLE,
       }));
     },
-    [createModelInstanceKey],
+    [createModelInstanceKey, parseModelRef],
   );
 
   const duplicateModelInstance = useCallback(
     (modelKey: string) => {
       const sourceChat = modelChats[modelKey];
       if (!sourceChat) return;
-      const baseModel = getBaseModelName(modelKey);
-      const clonedKey = createModelInstanceKey(baseModel);
+      const baseRef = getBaseModelRef(modelKey);
+      const { modelName } = parseModelRef(baseRef);
+      const clonedKey = createModelInstanceKey(baseRef);
 
       setSelectedModels((prev) => [...prev, clonedKey]);
       setModelChats((prev) => ({
         ...prev,
         [clonedKey]: {
-          modelName: baseModel,
+          modelName,
           messages: (prev[modelKey]?.messages || []).map((m) => ({ ...m })),
           isLoading: false,
         },
@@ -735,27 +963,27 @@ export default function Home() {
         [clonedKey]: prev[modelKey] || DEFAULT_ROLE,
       }));
     },
-    [modelChats, getBaseModelName, createModelInstanceKey],
+    [modelChats, getBaseModelRef, parseModelRef, createModelInstanceKey],
   );
 
   const toggleModel = useCallback(
-    (modelName: string) => {
+    (modelRef: string) => {
       if (isInterModelSelected || isInterModelChatActive) return;
       const selectedForBase = selectedModels.filter(
-        (modelKey) => getBaseModelName(modelKey) === modelName,
+        (modelKey) => getBaseModelRef(modelKey) === modelRef,
       );
       if (selectedForBase.length > 0) {
         // Toggle off removes all instances for this model name.
         selectedForBase.forEach((modelKey) => removeModel(modelKey));
       } else {
-        addModelInstance(modelName);
+        addModelInstance(modelRef);
       }
     },
     [
       selectedModels,
       removeModel,
       addModelInstance,
-      getBaseModelName,
+      getBaseModelRef,
       isInterModelSelected,
       isInterModelChatActive,
     ],
@@ -775,10 +1003,6 @@ export default function Home() {
   const sendMessage = useCallback(async () => {
     if ((!userInput.trim() && attachments.length === 0) || selectedModels.length === 0)
       return;
-    if (!apiBaseUrl) {
-      setOllamaError("Set a valid Ollama host URL in Settings.");
-      return;
-    }
 
     const taggedModels = parseTaggedModels(userInput, selectedModels);
     const targetModels =
@@ -851,7 +1075,9 @@ export default function Home() {
       return;
     }
 
-    // Add user message to all model chats
+    const previousModelChats = modelChats;
+
+    // Add user message to all model chats (UI state)
     setModelChats((prev) => {
       const updated = { ...prev };
       targetModels.forEach((model) => {
@@ -870,10 +1096,34 @@ export default function Home() {
     // Send message to all models in parallel
     const promises = targetModels.map(async (model) => {
       try {
-        const ai = await generateWithOllama(
+        const hostUrl = getHostUrlById(getHostIdFromModelKey(model));
+        if (!hostUrl) throw new Error("Host URL not found for selected model.");
+
+        const systemMessage = buildSystemMessageForModel(model);
+        const priorMessages = previousModelChats[model]?.messages || [];
+        const ollamaMessages: OllamaChatMessage[] = [
+          ...(systemMessage ? [systemMessage] : []),
+          ...convertUiMessagesToOllama(priorMessages),
+          {
+            role: "user",
+            content: buildPromptForModel(model, mergedUserPrompt),
+            ...(imagePayload.length > 0 ? { images: imagePayload } : {}),
+          },
+        ];
+
+        const rawAi = await generateWithOllama(
+          hostUrl,
           getBaseModelName(model),
-          buildPromptForModel(model, mergedUserPrompt),
-          imagePayload,
+          ollamaMessages,
+        );
+        const ai = applyOutputLengthLimit(
+          rawAi,
+          normalizeChatConfiguration({
+            enabled: settings.chatConfigEnabled,
+            prePrompt: settings.chatConfigPrePrompt,
+            postPrompt: settings.chatConfigPostPrompt,
+            maxOutputLength: settings.chatConfigMaxOutputLength,
+          }),
         );
 
         // Add assistant response
@@ -890,6 +1140,10 @@ export default function Home() {
         }));
       } catch (error) {
         console.error(`[v0] Error with model ${model}:`, error);
+        const hostId = getHostIdFromModelKey(model);
+        if (hostId) {
+          setHostStatuses((prev) => ({ ...prev, [hostId]: "failed" }));
+        }
         const detail =
           error instanceof Error ? error.message : "Unknown error";
         setModelChats((prev) => ({
@@ -918,10 +1172,18 @@ export default function Home() {
     isInterModelSelected,
     parseTaggedModels,
     stripModelTags,
-    apiBaseUrl,
     generateWithOllama,
+    getHostIdFromModelKey,
+    getHostUrlById,
     getBaseModelName,
     buildPromptForModel,
+    modelChats,
+    buildSystemMessageForModel,
+    convertUiMessagesToOllama,
+    settings.chatConfigEnabled,
+    settings.chatConfigPrePrompt,
+    settings.chatConfigPostPrompt,
+    settings.chatConfigMaxOutputLength,
   ]);
 
   const mentionSuggestions = useMemo(() => {
@@ -1082,10 +1344,6 @@ export default function Home() {
 
   const startInterModelChat = useCallback(
     async (seedOverride?: string, modelsOverride?: string[]) => {
-      if (!apiBaseUrl) {
-        setOllamaError("Set a valid Ollama host URL in Settings.");
-        return;
-      }
       const modelsToUse =
         modelsOverride && modelsOverride.length > 0
           ? modelsOverride
@@ -1098,6 +1356,13 @@ export default function Home() {
       setIsInterModelChatActive(true);
       interChatActiveRef.current = true;
       let currentIndex = 0;
+      const localHistory: Record<string, Message[]> = {};
+      modelsToUse.forEach((modelKey) => {
+        localHistory[modelKey] = [...(modelChats[modelKey]?.messages || [])];
+      });
+      const transcript: Array<{ speaker: string; content: string }> = [];
+      const seedSpeaker = "User";
+      transcript.push({ speaker: seedSpeaker, content: seed });
       while (interChatActiveRef.current) {
         const model = modelsToUse[currentIndex];
         setCurrentThinkingModel(model);
@@ -1109,11 +1374,48 @@ export default function Home() {
               isLoading: true,
             },
           }));
-          const ai = await generateWithOllama(
+          const hostUrl = getHostUrlById(getHostIdFromModelKey(model));
+          if (!hostUrl) throw new Error("Host URL not found for selected model.");
+          const hostId = getHostIdFromModelKey(model);
+          const hostLabel = (getHostUrlById(hostId) || hostId).replace(
+            /^https?:\/\//,
+            "",
+          );
+          const displayName = `${getBaseModelName(model)} @ ${hostLabel}`;
+          const latest = transcript[transcript.length - 1];
+          const interPrompt = `Inter-model conversation transcript:\n${transcript
+            .map((t, idx) => `${idx + 1}. ${t.speaker}: ${t.content}`)
+            .join("\n\n")}\n\nLatest speaker: ${latest.speaker}.\nRespond as ${displayName}, address the latest message, and continue the discussion.`;
+          const systemMessage = buildSystemMessageForModel(model);
+          const ollamaMessages: OllamaChatMessage[] = [
+            ...(systemMessage ? [systemMessage] : []),
+            ...convertUiMessagesToOllama(localHistory[model]),
+            {
+              role: "user",
+              content: buildPromptForModel(model, interPrompt),
+            },
+          ];
+          const rawAi = await generateWithOllama(
+            hostUrl,
             getBaseModelName(model),
-            buildPromptForModel(model, seed),
+            ollamaMessages,
+          );
+          const ai = applyOutputLengthLimit(
+            rawAi,
+            normalizeChatConfiguration({
+              enabled: settings.chatConfigEnabled,
+              prePrompt: settings.chatConfigPrePrompt,
+              postPrompt: settings.chatConfigPostPrompt,
+              maxOutputLength: settings.chatConfigMaxOutputLength,
+            }),
           );
           seed = ai;
+          transcript.push({ speaker: displayName, content: ai });
+          localHistory[model] = [
+            ...localHistory[model],
+            { role: "user", content: interPrompt },
+            { role: "assistant", content: ai },
+          ];
           setModelChats((prev) => ({
             ...prev,
             [model]: {
@@ -1126,6 +1428,10 @@ export default function Home() {
             },
           }));
         } catch (error) {
+          const hostId = getHostIdFromModelKey(model);
+          if (hostId) {
+            setHostStatuses((prev) => ({ ...prev, [hostId]: "failed" }));
+          }
           const detail =
             error instanceof Error ? error.message : "Unknown error";
           setModelChats((prev) => ({
@@ -1152,10 +1458,18 @@ export default function Home() {
       selectedModels,
       getLastAssistantMessageAny,
       getLastUserMessageAny,
-      apiBaseUrl,
       generateWithOllama,
+      getHostIdFromModelKey,
+      getHostUrlById,
       getBaseModelName,
+      buildSystemMessageForModel,
+      convertUiMessagesToOllama,
       buildPromptForModel,
+      modelChats,
+      settings.chatConfigEnabled,
+      settings.chatConfigPrePrompt,
+      settings.chatConfigPostPrompt,
+      settings.chatConfigMaxOutputLength,
     ],
   );
 
@@ -1177,7 +1491,7 @@ export default function Home() {
     if (settings.allowSameModelMultiChat) return;
     const seen = new Set<string>();
     const deduped = selectedModels.filter((modelKey) => {
-      const base = getBaseModelName(modelKey);
+      const base = getBaseModelRef(modelKey);
       if (seen.has(base)) return false;
       seen.add(base);
       return true;
@@ -1199,25 +1513,28 @@ export default function Home() {
       });
       return next;
     });
-  }, [settings.allowSameModelMultiChat, selectedModels, getBaseModelName]);
+  }, [settings.allowSameModelMultiChat, selectedModels, getBaseModelRef]);
 
   const modelDisplayNameByKey = useMemo(() => {
     const seenCount: Record<string, number> = {};
     const totalCount: Record<string, number> = {};
     selectedModels.forEach((modelKey) => {
-      const base = getBaseModelName(modelKey);
+      const base = getBaseModelRef(modelKey);
       totalCount[base] = (totalCount[base] || 0) + 1;
     });
 
     const out: Record<string, string> = {};
     selectedModels.forEach((modelKey) => {
-      const base = getBaseModelName(modelKey);
+      const base = getBaseModelRef(modelKey);
+      const { hostId, modelName } = parseModelRef(base);
+      const hostLabel = normalizedHosts.find((host) => host.id === hostId)?.url || hostId;
+      const compactHost = hostLabel.replace(/^https?:\/\//, "");
       seenCount[base] = (seenCount[base] || 0) + 1;
-      out[modelKey] =
-        totalCount[base] > 1 ? `${base} (${seenCount[base]})` : base;
+      const instanceLabel = totalCount[base] > 1 ? ` (${seenCount[base]})` : "";
+      out[modelKey] = `${modelName}${instanceLabel} @ ${compactHost}`;
     });
     return out;
-  }, [selectedModels, getBaseModelName]);
+  }, [selectedModels, getBaseModelRef, parseModelRef, normalizedHosts]);
 
   const taggedSelectedModels = useMemo(
     () =>
@@ -1237,8 +1554,6 @@ export default function Home() {
       modelDisplayNameByKey,
     ],
   );
-  const isLastOnboardingStep = onboardingStep === onboardingSteps.length - 1;
-
   return (
     <div className="flex h-screen flex-col bg-background">
       <div className="border-b border-border bg-background/95 backdrop-blur">
@@ -1372,13 +1687,14 @@ export default function Home() {
             className={`${selectedModels.length === 1 ? "max-w-none" : "max-w-2xl"} w-full mx-auto flex gap-1.5 flex-wrap justify-center ${isInterModelChatActive ? "opacity-50 pointer-events-none" : ""}`}
           >
             {availableModels.map((model) => {
+              const hostLabel = model.hostUrl.replace(/^https?:\/\//, "");
               const instanceCount = selectedModels.filter(
-                (modelKey) => getBaseModelName(modelKey) === model,
+                (modelKey) => getBaseModelRef(modelKey) === model.modelRef,
               ).length;
               const isSelected = instanceCount > 0;
               return (
                 <div
-                  key={model}
+                  key={model.modelRef}
                   className={`inline-flex items-center rounded-full border text-sm transition-colors overflow-hidden ${
                     isSelected
                       ? "bg-primary text-primary-foreground border-primary"
@@ -1386,20 +1702,20 @@ export default function Home() {
                   }`}
                 >
                   <button
-                    onClick={() => toggleModel(model)}
-                    className={`px-3 py-1 ${!isSelected ? "hover:bg-muted/40" : ""}`}
-                    aria-label={`Toggle ${model}`}
+                    onClick={() => toggleModel(model.modelRef)}
+                    className={`px-3 py-1 ${!isSelected ? "hover:bg-muted/40" : ""} max-w-[260px] truncate`}
+                    aria-label={`Toggle ${model.modelName} on ${hostLabel}`}
                   >
-                    {model}
+                    {model.modelName} <span className="opacity-80">@{hostLabel}</span>
                     {instanceCount > 1 ? ` x${instanceCount}` : ""}
                   </button>
                   {settings.allowSameModelMultiChat && isSelected && (
                     <button
                       type="button"
-                      onClick={() => addModelInstance(model)}
+                      onClick={() => addModelInstance(model.modelRef)}
                       disabled={isInterModelSelected || isInterModelChatActive}
                       className="h-full px-2.5 py-1 border-l border-primary-foreground/30 text-sm leading-none hover:bg-primary-foreground/15 disabled:opacity-50 disabled:cursor-not-allowed"
-                      aria-label={`Add another ${model}`}
+                      aria-label={`Add another ${model.modelName}`}
                     >
                       +
                     </button>
@@ -1629,308 +1945,110 @@ export default function Home() {
         </div>
       </div>
 
-      <Sheet open={isSettingsOpen} onOpenChange={setIsSettingsOpen}>
-        <SheetContent
-          side="right"
-          className="w-[320px] max-w-[85vw] px-5 sm:px-6"
-          onOpenAutoFocus={(event) => event.preventDefault()}
-        >
-          <SheetHeader className="space-y-3">
-            <SheetTitle>Settings</SheetTitle>
-            <SheetDescription>
-              Configure Ollama host, persistence, and app install options.
-            </SheetDescription>
-          </SheetHeader>
+      <SettingsDrawer
+        open={isSettingsOpen}
+        onOpenChange={setIsSettingsOpen}
+        settings={settings}
+        hostStatuses={hostStatuses}
+        onAddHost={addHost}
+        onRemoveHost={removeHost}
+        onHostUrlChange={(hostId, value) =>
+          setSettings((prev) => ({
+            ...prev,
+            hosts: prev.hosts.map((host) =>
+              host.id === hostId ? { ...host, url: value } : host,
+            ),
+          }))
+        }
+        onHostUrlBlur={(hostId) =>
+          setSettings((prev) => ({
+            ...prev,
+            hosts: prev.hosts.map((host) =>
+              host.id === hostId
+                ? { ...host, url: normalizeOllamaBaseUrl(host.url) }
+                : host,
+            ),
+          }))
+        }
+        onTestHostConnection={testHostConnection}
+        onPersistDataChange={(checked) =>
+          setSettings((prev) => ({
+            ...prev,
+            persistDataLocally: checked,
+          }))
+        }
+        onEnableRolesChange={(checked) =>
+          setSettings((prev) => ({
+            ...prev,
+            enableRoles: checked,
+          }))
+        }
+        onAllowSameModelMultiChatChange={(checked) =>
+          setSettings((prev) => ({
+            ...prev,
+            allowSameModelMultiChat: checked,
+          }))
+        }
+        onChatConfigEnabledChange={(checked) =>
+          setSettings((prev) => ({
+            ...prev,
+            chatConfigEnabled: checked,
+          }))
+        }
+        onChatConfigPrePromptChange={(value) =>
+          setSettings((prev) => ({
+            ...prev,
+            chatConfigPrePrompt: value,
+          }))
+        }
+        onChatConfigPostPromptChange={(value) =>
+          setSettings((prev) => ({
+            ...prev,
+            chatConfigPostPrompt: value,
+          }))
+        }
+        onChatConfigMaxOutputLengthChange={(value) =>
+          setSettings((prev) => ({
+            ...prev,
+            chatConfigMaxOutputLength: value,
+          }))
+        }
+        onClearSavedChats={clearPersistedData}
+        canInstallPwa={canInstallPwa}
+        onInstallPwa={installPwa}
+      />
 
-          <div className="mt-7 space-y-6">
-            <div className="space-y-2">
-              <label
-                htmlFor="ollama-host"
-                className="text-xs font-medium text-muted-foreground"
-              >
-                Ollama Host URL
-              </label>
-              <input
-                id="ollama-host"
-                type="text"
-                value={settings.ollamaBaseUrl}
-                onChange={(e) =>
-                  setSettings((prev) => ({
-                    ...prev,
-                    ollamaBaseUrl: e.target.value,
-                  }))
-                }
-                onBlur={() =>
-                  setSettings((prev) => ({
-                    ...prev,
-                    ollamaBaseUrl:
-                      normalizeOllamaBaseUrl(prev.ollamaBaseUrl) ||
-                      DEFAULT_SETTINGS.ollamaBaseUrl,
-                  }))
-                }
-                placeholder="http://127.0.0.1:11434"
-                className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm"
-              />
-              <p className="text-[11px] text-muted-foreground inline-flex items-center gap-1.5">
-                <span className="h-2 w-2 rounded-full bg-emerald-500" />
-                Active host: <code>{apiBaseUrl || "not set"}</code>
-              </p>
-            </div>
+      <OnboardingDialog
+        open={isOnboardingOpen}
+        onboardingStep={onboardingStep}
+        onboardingSteps={onboardingSteps}
+        publicBasePath={PUBLIC_BASE_PATH}
+        onBack={() => {
+          if (onboardingStep === 0) return;
+          setOnboardingStep((prev) => Math.max(0, prev - 1));
+        }}
+        onNext={() =>
+          setOnboardingStep((prev) =>
+            Math.min(onboardingSteps.length - 1, prev + 1),
+          )
+        }
+        onFinish={completeOnboarding}
+      />
 
-            <div className="rounded-md border border-border/70 bg-muted/20 p-3 space-y-3">
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-sm text-foreground">
-                  Persist selected models and chats in browser local storage
-                </span>
-                <Switch
-                  checked={settings.persistDataLocally}
-                  onCheckedChange={(checked) =>
-                    setSettings((prev) => ({
-                      ...prev,
-                      persistDataLocally: checked,
-                    }))
-                  }
-                  aria-label="Persist data locally"
-                />
-              </div>
-            </div>
-
-            <div className="rounded-md border border-border/70 bg-muted/20 p-3">
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-sm text-foreground">Enable Roles</span>
-                <Switch
-                  checked={settings.enableRoles}
-                  onCheckedChange={(checked) =>
-                    setSettings((prev) => ({
-                      ...prev,
-                      enableRoles: checked,
-                    }))
-                  }
-                  aria-label="Enable role assignment"
-                />
-              </div>
-            </div>
-
-            <div className="rounded-md border border-border/70 bg-muted/20 p-3">
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-sm text-foreground">
-                  Allow same model multi chat
-                </span>
-                <Switch
-                  checked={settings.allowSameModelMultiChat}
-                  onCheckedChange={(checked) =>
-                    setSettings((prev) => ({
-                      ...prev,
-                      allowSameModelMultiChat: checked,
-                    }))
-                  }
-                  aria-label="Allow same model multiple instances"
-                />
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2 flex-wrap pt-1">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={handleTestConnection}
-              >
-                Test connection
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={clearPersistedData}
-              >
-                <Trash2 className="h-4 w-4 mr-1" />
-                Clear saved chats
-              </Button>
-
-              {canInstallPwa && (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={installPwa}
-                >
-                  <Download className="h-4 w-4 mr-1" />
-                  Install app
-                </Button>
-              )}
-            </div>
-          </div>
-        </SheetContent>
-      </Sheet>
-
-      <Dialog open={isOnboardingOpen}>
-        <DialogContent
-          className="max-w-md"
-          onEscapeKeyDown={(event) => event.preventDefault()}
-          onInteractOutside={(event) => event.preventDefault()}
-        >
-          <DialogHeader>
-            <img
-              src={`${PUBLIC_BASE_PATH}/logo.png`}
-              alt="Multi Llama Chat logo"
-              className="h-12 w-12 object-contain mx-auto sm:mx-0 invert dark:invert-0"
-            />
-            <DialogTitle>{onboardingSteps[onboardingStep].title}</DialogTitle>
-            <DialogDescription>
-              {onboardingSteps[onboardingStep].description}
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="space-y-3">
-            <div className="text-xs text-muted-foreground">
-              Step {onboardingStep + 1} of {onboardingSteps.length}
-            </div>
-            <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-              <div
-                className="h-full bg-primary transition-all"
-                style={{
-                  width: `${((onboardingStep + 1) / onboardingSteps.length) * 100}%`,
-                }}
-              />
-            </div>
-
-            {onboardingStep === onboardingSteps.length - 1 && (
-              <div className="rounded-md border border-border bg-muted/20 p-3 text-xs text-muted-foreground leading-relaxed">
-                If Ollama is not running locally, open Settings and set a remote
-                Ollama URL.
-              </div>
-            )}
-          </div>
-
-          <DialogFooter className="sm:justify-between">
-            <Button
-              variant="outline"
-              onClick={() => {
-                if (onboardingStep === 0) return;
-                setOnboardingStep((prev) => Math.max(0, prev - 1));
-              }}
-              disabled={onboardingStep === 0}
-            >
-              Back
-            </Button>
-
-            <Button
-              onClick={() => {
-                if (isLastOnboardingStep) {
-                  completeOnboarding();
-                  return;
-                }
-                setOnboardingStep((prev) =>
-                  Math.min(onboardingSteps.length - 1, prev + 1),
-                );
-              }}
-            >
-              {isLastOnboardingStep ? "Finish" : "Next"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <AlertDialog open={showOllamaSetupAlert} onOpenChange={setShowOllamaSetupAlert}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <div className="flex items-center gap-2">
-              <div className="h-8 w-8 rounded-full bg-red-500/15 border border-red-500/30 flex items-center justify-center">
-                <AlertTriangle className="h-4 w-4 text-red-500" />
-              </div>
-              <AlertDialogTitle>Unable to connect to Ollama</AlertDialogTitle>
-            </div>
-            <AlertDialogDescription>
-              This app requires a reachable Ollama server before chats can run.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-
-          <div className="space-y-3">
-            <div className="rounded-md border border-border bg-muted/30 p-3">
-              <p className="text-xs text-muted-foreground mb-1">Current Ollama URL</p>
-              <code className="text-sm">{apiBaseUrl || "Not configured"}</code>
-            </div>
-
-            <div className="text-xs text-muted-foreground space-y-3 break-words">
-              <p className="font-medium text-foreground">Setup steps</p>
-              <p>
-                1. Install Ollama:{" "}
-                <a
-                  href="https://ollama.com/download"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-primary underline underline-offset-2"
-                >
-                  ollama.com/download
-                </a>
-              </p>
-              <p>2. Open the Ollama app if it is already installed</p>
-              <p>3. Start Ollama on your machine</p>
-              <p className="flex items-center gap-2 flex-wrap min-w-0">
-                <span>
-                  4. Pull a model: <code>ollama pull llama3.2</code>
-                </span>
-                <button
-                  type="button"
-                  onClick={copyInstallCommand}
-                  className="h-6 w-6 rounded border border-border inline-flex items-center justify-center hover:bg-muted transition-colors"
-                  aria-label="Copy command"
-                >
-                  {didCopyInstallCommand ? (
-                    <Check className="h-3.5 w-3.5" />
-                  ) : (
-                    <Copy className="h-3.5 w-3.5" />
-                  )}
-                </button>
-              </p>
-              <div className="space-y-1.5">
-                <p>5. Start Ollama for browser/network access:</p>
-                <div className="rounded-md border border-border bg-background/60 px-2.5 py-2 text-xs break-all flex items-start justify-between gap-2">
-                  <code className="break-all whitespace-pre-wrap flex-1">
-                    {ollamaNetworkCommand}
-                  </code>
-                  <button
-                    type="button"
-                    onClick={copyNetworkCommand}
-                    className="h-6 w-6 rounded border border-border inline-flex items-center justify-center hover:bg-muted transition-colors shrink-0"
-                    aria-label="Copy network command"
-                  >
-                    {didCopyNetworkCommand ? (
-                      <Check className="h-3.5 w-3.5" />
-                    ) : (
-                      <Copy className="h-3.5 w-3.5" />
-                    )}
-                  </button>
-                </div>
-              </div>
-              <p className="text-[11px] leading-relaxed text-muted-foreground">
-                Note: <code>OLLAMA_ORIGINS=&quot;*&quot;</code> allows all browser
-                origins. You can replace <code>*</code> with specific URLs later
-                for tighter security.
-              </p>
-              <p>
-                6. In Settings, set Ollama URL to{" "}
-                <code>http://127.0.0.1:11434</code> if this app and Ollama run on
-                the same machine. Use <code>http://&lt;LAN-IP&gt;:11434</code>{" "}
-                only when connecting from another device.
-              </p>
-            </div>
-          </div>
-
-          <AlertDialogFooter>
-            <AlertDialogCancel>Close</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                setIsSettingsOpen(true);
-                setShowOllamaSetupAlert(false);
-              }}
-            >
-              Open Settings
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <OllamaSetupAlertDialog
+        open={showOllamaSetupAlert}
+        onOpenChange={setShowOllamaSetupAlert}
+        apiBaseUrl={apiBaseUrl}
+        didCopyInstallCommand={didCopyInstallCommand}
+        didCopyNetworkCommand={didCopyNetworkCommand}
+        ollamaNetworkCommand={ollamaNetworkCommand}
+        onCopyInstallCommand={copyInstallCommand}
+        onCopyNetworkCommand={copyNetworkCommand}
+        onOpenSettings={() => {
+          setIsSettingsOpen(true);
+          setShowOllamaSetupAlert(false);
+        }}
+      />
     </div>
   );
 }

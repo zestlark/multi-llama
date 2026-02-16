@@ -30,6 +30,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Run tests (must pass)
+        run: npm run test:ci
+
       - name: Build static site
         run: npm run build
 
