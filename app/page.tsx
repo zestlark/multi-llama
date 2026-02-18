@@ -19,6 +19,8 @@ import {
   MessagesSquare,
   Settings2,
   PanelRightOpen,
+  Download,
+  Trash2,
   Sun,
   Moon,
   Paperclip,
@@ -32,6 +34,8 @@ import NetworkScanDialog from "@/components/NetworkScanDialog";
 import OnboardingDialog from "@/components/OnboardingDialog";
 import OllamaSetupAlertDialog from "@/components/OllamaSetupAlertDialog";
 import ChatHistoryDrawer from "@/components/ChatHistoryDrawer";
+import ConfirmDlg from "@/components/ConfirmDlg";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
   HoverCard,
   HoverCardContent,
@@ -91,6 +95,37 @@ const formatBytes = (bytes?: number) => {
   return `${value.toFixed(value >= 10 || idx === 0 ? 0 : 1)} ${units[idx]}`;
 };
 
+const LOCAL_MODEL_CATALOG = [
+  { name: "llama3.2:1b", sizeLabel: "~1.3 GB" },
+  { name: "llama3.2:3b", sizeLabel: "~2.0 GB" },
+  { name: "qwen2.5:0.5b", sizeLabel: "~0.4 GB" },
+  { name: "qwen2.5:1.5b", sizeLabel: "~1.0 GB" },
+  { name: "qwen2.5:3b", sizeLabel: "~1.9 GB" },
+  { name: "qwen2.5:7b", sizeLabel: "~4.7 GB" },
+  { name: "qwen2.5-coder:7b", sizeLabel: "~4.8 GB" },
+  { name: "gemma3:1b", sizeLabel: "~0.8 GB" },
+  { name: "gemma3:4b", sizeLabel: "~2.6 GB" },
+  { name: "phi3:mini", sizeLabel: "~2.2 GB" },
+  { name: "mistral:7b", sizeLabel: "~4.1 GB" },
+  { name: "deepseek-r1:1.5b", sizeLabel: "~1.1 GB" },
+  { name: "deepseek-r1:7b", sizeLabel: "~4.7 GB" },
+  { name: "codellama:7b", sizeLabel: "~3.8 GB" },
+];
+
+const isLocalHostUrl = (url: string) => {
+  try {
+    const parsed = new URL(url);
+    return ["127.0.0.1", "localhost", "0.0.0.0"].includes(parsed.hostname);
+  } catch {
+    return false;
+  }
+};
+
+const sessionHasMessages = (session: ChatSession) =>
+  Object.values(session.modelChats || {}).some((chat) =>
+    (chat.messages || []).some((message) => !!message.content?.trim()),
+  );
+
 export default function Home() {
   const { resolvedTheme, setTheme } = useTheme();
   const [isThemeReady, setIsThemeReady] = useState(false);
@@ -108,6 +143,23 @@ export default function Home() {
   const [showOllamaSetupAlert, setShowOllamaSetupAlert] = useState(false);
   const [didCopyInstallCommand, setDidCopyInstallCommand] = useState(false);
   const [didCopyNetworkCommand, setDidCopyNetworkCommand] = useState(false);
+  const [isModelManagerOpen, setIsModelManagerOpen] = useState(false);
+  const [modelActionStatus, setModelActionStatus] = useState<
+    Record<string, "downloading" | "deleting">
+  >({});
+  const [pendingModelConfirm, setPendingModelConfirm] = useState<{
+    action: "download" | "delete";
+    modelName: string;
+    sizeLabel?: string;
+  } | null>(null);
+  const [pendingClearChatsConfirm, setPendingClearChatsConfirm] =
+    useState(false);
+  const [pendingDeleteChatId, setPendingDeleteChatId] = useState<string | null>(
+    null,
+  );
+  const [chatRouteAlert, setChatRouteAlert] = useState<{
+    requestedId: string;
+  } | null>(null);
   const [isHydrated, setIsHydrated] = useState(false);
   const { canInstallPwa, canUpdatePwa, isUpdatingPwa, installPwa, updatePwa } =
     usePwaLifecycle(PUBLIC_BASE_PATH);
@@ -135,6 +187,7 @@ export default function Home() {
   const [activeMentionEnd, setActiveMentionEnd] = useState<number | null>(null);
   const [activeMentionQuery, setActiveMentionQuery] = useState("");
   const [mentionHighlightIndex, setMentionHighlightIndex] = useState(0);
+  const [isMobileViewport, setIsMobileViewport] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const modelCardRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -191,6 +244,31 @@ export default function Home() {
       : 'OLLAMA_HOST=0.0.0.0:11434 OLLAMA_ORIGINS="*" ollama serve';
   const ollamaNetworkCommandLabel =
     clientOs === "windows" ? "Windows PowerShell" : "macOS / Ubuntu / Linux";
+  const connectedLocalHost = useMemo(
+    () =>
+      normalizedHosts.find(
+        (host) =>
+          isLocalHostUrl(host.url) && hostStatuses[host.id] === "connected",
+      ) || null,
+    [normalizedHosts, hostStatuses],
+  );
+  const localDownloadedModels = useMemo(() => {
+    if (!connectedLocalHost) return [];
+    const items = availableModels
+      .filter((model) => model.hostId === connectedLocalHost.id)
+      .map((model) => ({ name: model.modelName, size: model.size }));
+    return Array.from(
+      new Map(items.map((item) => [item.name, item])).values(),
+    ).sort((a, b) => a.name.localeCompare(b.name));
+  }, [connectedLocalHost, availableModels]);
+  const localNotDownloadedModels = useMemo(
+    () =>
+      LOCAL_MODEL_CATALOG.filter(
+        (model) =>
+          !localDownloadedModels.some((downloaded) => downloaded.name === model.name),
+      ),
+    [localDownloadedModels],
+  );
 
   const getBaseModelRef = useCallback((modelKey: string) => {
     const idx = modelKey.indexOf(MODEL_INSTANCE_DELIMITER);
@@ -238,8 +316,44 @@ export default function Home() {
       .slice(2, 8)}`;
   }, []);
 
+  const setChatIdQuery = useCallback(
+    (chatId: string, mode: "replace" | "push" = "replace") => {
+      if (typeof window === "undefined" || !chatId) return;
+      const url = new URL(window.location.href);
+      if (url.searchParams.get("chatid") === chatId) return;
+      url.searchParams.set("chatid", chatId);
+      if (mode === "push") {
+        window.history.pushState({}, "", url.toString());
+      } else {
+        window.history.replaceState({}, "", url.toString());
+      }
+    },
+    [],
+  );
+
+  const clearChatIdQuery = useCallback((mode: "replace" | "push" = "replace") => {
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has("chatid")) return;
+    url.searchParams.delete("chatid");
+    if (mode === "push") {
+      window.history.pushState({}, "", url.toString());
+    } else {
+      window.history.replaceState({}, "", url.toString());
+    }
+  }, []);
+
   useEffect(() => {
     setIsThemeReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const media = window.matchMedia("(max-width: 767px)");
+    const update = () => setIsMobileViewport(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
   }, []);
 
   const parseTaggedModels = useCallback(
@@ -500,6 +614,17 @@ export default function Home() {
     [createModelRef],
   );
 
+  const refreshHostModels = useCallback(
+    async (hostId: string, hostUrl: string) => {
+      const models = await fetchModelsFromHost(hostId, hostUrl);
+      setAvailableModels((prev) => {
+        const withoutHost = prev.filter((model) => model.hostId !== hostId);
+        return [...withoutHost, ...models];
+      });
+    },
+    [fetchModelsFromHost],
+  );
+
   const fetchAllHostModels = useCallback(
     async (showSetupAlertOnFailure: boolean) => {
       const validHosts = normalizedHosts.filter((host) => !!host.url);
@@ -580,6 +705,11 @@ export default function Home() {
 
   useEffect(() => {
     try {
+      const requestedChatId = (() => {
+        if (typeof window === "undefined") return "";
+        return new URLSearchParams(window.location.search).get("chatid")?.trim() || "";
+      })();
+
       const rawSettings = localStorage.getItem(SETTINGS_STORAGE_KEY);
       if (rawSettings) {
         const parsed = JSON.parse(rawSettings) as Partial<UserSettings>;
@@ -669,27 +799,45 @@ export default function Home() {
                 !!session.modelChats &&
                 typeof session.modelRoles === "object" &&
                 !!session.modelRoles,
-            )
+            ).filter((session) => sessionHasMessages(session))
           : [];
 
         if (loadedSessions.length > 0) {
-          setChatSessions(loadedSessions);
-          const activeId =
-            typeof parsed.activeChatId === "string" &&
-            loadedSessions.some((s) => s.id === parsed.activeChatId)
-              ? parsed.activeChatId
-              : loadedSessions[0].id;
-          setActiveChatId(activeId);
-          const activeSession = loadedSessions.find((s) => s.id === activeId) || loadedSessions[0];
-          setSelectedModels(activeSession.selectedModels || []);
-          setModelChats(activeSession.modelChats || {});
-          const normalizedRoles = Object.fromEntries(
-            Object.entries(activeSession.modelRoles || {}).map(([k, v]) => [
-              k,
-              normalizeRoleLabel(String(v || DEFAULT_ROLE)),
-            ]),
-          );
-          setModelRoles(normalizedRoles);
+          const normalizeSessionRoles = (session: ChatSession) =>
+            Object.fromEntries(
+              Object.entries(session.modelRoles || {}).map(([k, v]) => [
+                k,
+                normalizeRoleLabel(String(v || DEFAULT_ROLE)),
+              ]),
+            );
+
+          if (requestedChatId) {
+            const requestedSession = loadedSessions.find(
+              (session) => session.id === requestedChatId,
+            );
+            if (requestedSession) {
+              setChatSessions(loadedSessions);
+              setActiveChatId(requestedSession.id);
+              setSelectedModels(requestedSession.selectedModels || []);
+              setModelChats(requestedSession.modelChats || {});
+              setModelRoles(normalizeSessionRoles(requestedSession));
+            } else {
+              const fresh = createChatSession();
+              setChatSessions([fresh, ...loadedSessions]);
+              setActiveChatId(fresh.id);
+              setSelectedModels(fresh.selectedModels);
+              setModelChats(fresh.modelChats);
+              setModelRoles(fresh.modelRoles);
+              setChatRouteAlert({ requestedId: requestedChatId });
+            }
+          } else {
+            const fresh = createChatSession();
+            setChatSessions([fresh, ...loadedSessions]);
+            setActiveChatId(fresh.id);
+            setSelectedModels(fresh.selectedModels);
+            setModelChats(fresh.modelChats);
+            setModelRoles(fresh.modelRoles);
+          }
         } else {
           const loadedSelected = Array.isArray(parsed.selectedModels)
             ? parsed.selectedModels.filter((v): v is string => typeof v === "string")
@@ -703,17 +851,34 @@ export default function Home() {
             modelChats: loadedChats,
             modelRoles: loadedRoles,
           });
-          setChatSessions([migratedSession]);
-          setActiveChatId(migratedSession.id);
-          setSelectedModels(migratedSession.selectedModels);
-          setModelChats(migratedSession.modelChats);
-          const normalizedMigratedRoles = Object.fromEntries(
-            Object.entries(migratedSession.modelRoles || {}).map(([k, v]) => [
-              k,
-              normalizeRoleLabel(String(v || DEFAULT_ROLE)),
-            ]),
-          );
-          setModelRoles(normalizedMigratedRoles);
+          if (requestedChatId && requestedChatId !== migratedSession.id) {
+            const fresh = createChatSession();
+            setChatSessions([fresh, migratedSession]);
+            setActiveChatId(fresh.id);
+            setSelectedModels(fresh.selectedModels);
+            setModelChats(fresh.modelChats);
+            setModelRoles(fresh.modelRoles);
+            setChatRouteAlert({ requestedId: requestedChatId });
+          } else if (requestedChatId && requestedChatId === migratedSession.id) {
+            setChatSessions([migratedSession]);
+            setActiveChatId(migratedSession.id);
+            setSelectedModels(migratedSession.selectedModels);
+            setModelChats(migratedSession.modelChats);
+            const normalizedMigratedRoles = Object.fromEntries(
+              Object.entries(migratedSession.modelRoles || {}).map(([k, v]) => [
+                k,
+                normalizeRoleLabel(String(v || DEFAULT_ROLE)),
+              ]),
+            );
+            setModelRoles(normalizedMigratedRoles);
+          } else {
+            const fresh = createChatSession();
+            setChatSessions([fresh, migratedSession]);
+            setActiveChatId(fresh.id);
+            setSelectedModels(fresh.selectedModels);
+            setModelChats(fresh.modelChats);
+            setModelRoles(fresh.modelRoles);
+          }
         }
 
         if (loadedRoleLibrary.length > 0) {
@@ -723,6 +888,9 @@ export default function Home() {
         const initialSession = createChatSession();
         setChatSessions([initialSession]);
         setActiveChatId(initialSession.id);
+        if (requestedChatId) {
+          setChatRouteAlert({ requestedId: requestedChatId });
+        }
       }
 
       const onboardingDone =
@@ -777,8 +945,11 @@ export default function Home() {
       return;
     }
 
+    const persistedSessions = chatSessions.filter((session) =>
+      sessionHasMessages(session),
+    );
     const payload: PersistedChatState = {
-      chatSessions,
+      chatSessions: persistedSessions,
       activeChatId,
       selectedModels,
       modelChats,
@@ -810,17 +981,21 @@ export default function Home() {
   }, []);
 
   const startNewChat = useCallback(() => {
-    const fresh = createChatSession();
-    setChatSessions((prev) => [fresh, ...prev]);
-    setActiveChatId(fresh.id);
-    setSelectedModels(fresh.selectedModels);
-    setModelChats(fresh.modelChats);
-    setModelRoles(fresh.modelRoles);
+    setActiveChatId("");
+    setSelectedModels([]);
+    setModelChats({});
+    setModelRoles({});
     setUserInput("");
     setAttachments([]);
     setIsInterModelSelected(false);
     setIsInterModelChatActive(false);
-  }, []);
+    setCurrentThinkingModel("");
+    setIsChatHistoryOpen(false);
+    clearChatIdQuery("push");
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+    });
+  }, [clearChatIdQuery]);
 
   const switchToChat = useCallback(
     (chatId: string) => {
@@ -835,8 +1010,44 @@ export default function Home() {
       setIsInterModelSelected(false);
       setIsInterModelChatActive(false);
       setIsChatHistoryOpen(false);
+      setChatIdQuery(target.id, "push");
     },
-    [chatSessions],
+    [chatSessions, setChatIdQuery],
+  );
+
+  const deleteChatSession = useCallback(
+    (chatId: string) => {
+      const remaining = chatSessions.filter((session) => session.id !== chatId);
+      setChatSessions(remaining);
+      if (activeChatId !== chatId) return;
+
+      if (remaining.length > 0) {
+        const nextSession = remaining[0];
+        setActiveChatId(nextSession.id);
+        setSelectedModels(nextSession.selectedModels || []);
+        setModelChats(nextSession.modelChats || {});
+        setModelRoles(nextSession.modelRoles || {});
+        setUserInput("");
+        setAttachments([]);
+        setIsInterModelSelected(false);
+        setIsInterModelChatActive(false);
+        setCurrentThinkingModel("");
+        setChatIdQuery(nextSession.id, "replace");
+        return;
+      }
+
+      setActiveChatId("");
+      setSelectedModels([]);
+      setModelChats({});
+      setModelRoles({});
+      setUserInput("");
+      setAttachments([]);
+      setIsInterModelSelected(false);
+      setIsInterModelChatActive(false);
+      setCurrentThinkingModel("");
+      clearChatIdQuery("replace");
+    },
+    [activeChatId, chatSessions, clearChatIdQuery, setChatIdQuery],
   );
 
   const copyInstallCommand = useCallback(async () => {
@@ -871,6 +1082,92 @@ export default function Home() {
       ],
     }));
   }, []);
+
+  const downloadModelToLocalHost = useCallback(
+    async (modelName: string, sizeLabel?: string) => {
+      if (!connectedLocalHost) return;
+      setModelActionStatus((prev) => ({ ...prev, [modelName]: "downloading" }));
+      const toastId = toast.loading(`Downloading ${modelName}...`);
+      try {
+        const response = await fetch(`${connectedLocalHost.url}/api/pull`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: modelName, stream: false }),
+        });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        await refreshHostModels(connectedLocalHost.id, connectedLocalHost.url);
+        toast.success(`Downloaded ${modelName}`, { id: toastId });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : "Unknown error";
+        toast.error(`Download failed: ${detail}`, { id: toastId });
+      } finally {
+        setModelActionStatus((prev) => {
+          const next = { ...prev };
+          delete next[modelName];
+          return next;
+        });
+      }
+    },
+    [connectedLocalHost, refreshHostModels],
+  );
+
+  const deleteModelFromLocalHost = useCallback(
+    async (modelName: string, sizeLabel?: string) => {
+      if (!connectedLocalHost) return;
+      setModelActionStatus((prev) => ({ ...prev, [modelName]: "deleting" }));
+      const toastId = toast.loading(`Deleting ${modelName}...`);
+      try {
+        let response = await fetch(`${connectedLocalHost.url}/api/delete`, {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: modelName }),
+        });
+        if (!response.ok) {
+          response = await fetch(`${connectedLocalHost.url}/api/delete`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: modelName }),
+          });
+        }
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        await refreshHostModels(connectedLocalHost.id, connectedLocalHost.url);
+        toast.success(`Deleted ${modelName}`, { id: toastId });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : "Unknown error";
+        toast.error(`Delete failed: ${detail}`, { id: toastId });
+      } finally {
+        setModelActionStatus((prev) => {
+          const next = { ...prev };
+          delete next[modelName];
+          return next;
+        });
+      }
+    },
+    [connectedLocalHost, refreshHostModels],
+  );
+
+  const requestDownloadModel = useCallback((modelName: string, sizeLabel?: string) => {
+    setPendingModelConfirm({ action: "download", modelName, sizeLabel });
+  }, []);
+
+  const requestDeleteModel = useCallback((modelName: string, sizeLabel?: string) => {
+    setPendingModelConfirm({ action: "delete", modelName, sizeLabel });
+  }, []);
+
+  const confirmPendingModelAction = useCallback(async () => {
+    if (!pendingModelConfirm) return;
+    const { action, modelName, sizeLabel } = pendingModelConfirm;
+    setPendingModelConfirm(null);
+    if (action === "download") {
+      await downloadModelToLocalHost(modelName, sizeLabel);
+      return;
+    }
+    await deleteModelFromLocalHost(modelName, sizeLabel);
+  }, [pendingModelConfirm, downloadModelToLocalHost, deleteModelFromLocalHost]);
 
   const removeHost = useCallback((hostId: string) => {
     setSettings((prev) => {
@@ -1089,6 +1386,25 @@ export default function Home() {
     if ((!userInput.trim() && attachments.length === 0) || selectedModels.length === 0)
       return;
 
+    let sessionIdForMessage = activeChatId;
+    if (!sessionIdForMessage) {
+      const fresh = createChatSession({
+        selectedModels,
+        modelChats,
+        modelRoles,
+      });
+      sessionIdForMessage = fresh.id;
+      setChatSessions((prev) => [fresh, ...prev]);
+      setActiveChatId(fresh.id);
+    }
+
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      if (!params.get("chatid")) {
+        setChatIdQuery(sessionIdForMessage, "push");
+      }
+    }
+
     const taggedModels = parseTaggedModels(userInput, selectedModels);
     const targetModels =
       taggedModels.length > 0 ? taggedModels : [...selectedModels];
@@ -1265,6 +1581,10 @@ export default function Home() {
     modelChats,
     buildSystemMessageForModel,
     convertUiMessagesToOllama,
+    activeChatId,
+    createChatSession,
+    setChatIdQuery,
+    modelRoles,
     settings.chatConfigEnabled,
     settings.chatConfigPrePrompt,
     settings.chatConfigPostPrompt,
@@ -1371,6 +1691,11 @@ export default function Home() {
 
   const handleAutoResize = (el: HTMLTextAreaElement | null) => {
     if (!el) return;
+    if (!el.value.trim()) {
+      el.style.height = "38px";
+      el.style.overflowY = "hidden";
+      return;
+    }
     el.style.height = "auto";
     const maxHeight = 160;
     const nextHeight = Math.min(el.scrollHeight, maxHeight);
@@ -1643,6 +1968,7 @@ export default function Home() {
   const chatSessionItems = useMemo(
     () =>
       [...chatSessions]
+        .filter((session) => sessionHasMessages(session))
         .sort((a, b) => b.updatedAt - a.updatedAt)
         .map((session) => {
           const baseRefs = new Set(
@@ -1675,6 +2001,131 @@ export default function Home() {
             >
               <PanelRightOpen className="h-4 w-4 text-foreground" />
             </button>
+            {connectedLocalHost ? (
+              <Popover
+                open={isModelManagerOpen}
+                onOpenChange={setIsModelManagerOpen}
+              >
+                <PopoverTrigger asChild>
+                  <button
+                    type="button"
+                    className="h-8 w-8 rounded-full border border-border bg-card hover:bg-muted/50 transition-colors inline-flex items-center justify-center"
+                    aria-label="Manage local models"
+                  >
+                    <Download className="h-4 w-4 text-foreground" />
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent
+                  align="start"
+                  className="w-80 max-h-[70vh] overflow-y-auto slim-scrollbar p-3 space-y-3"
+                >
+                  <div className="space-y-0.5">
+                    <p className="text-sm font-medium text-foreground">Local Models</p>
+                    <p className="text-[11px] text-muted-foreground break-all">
+                      Host: {connectedLocalHost.url}
+                    </p>
+                  </div>
+
+                  <div className="space-y-1">
+                    <p className="text-[11px] text-muted-foreground">Downloaded</p>
+                    <div className="space-y-1">
+                      {localDownloadedModels.length === 0 ? (
+                        <p className="text-xs text-muted-foreground">No models downloaded.</p>
+                      ) : (
+                        localDownloadedModels.map((model) => {
+                          const modelName = model.name;
+                          const busy = modelActionStatus[modelName] === "deleting";
+                          return (
+                            <div
+                              key={`local-${modelName}`}
+                              className="flex items-center justify-between gap-2 rounded-md border border-border/70 px-2 py-1.5"
+                            >
+                              <span className="text-xs truncate">
+                                {modelName}
+                                <span className="text-muted-foreground"> ({formatBytes(model.size)})</span>
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  requestDeleteModel(
+                                    modelName,
+                                    formatBytes(model.size),
+                                  )
+                                }
+                                disabled={!!modelActionStatus[modelName]}
+                                className="h-6 w-6 rounded border border-border inline-flex items-center justify-center hover:bg-muted disabled:opacity-50"
+                                aria-label={`Delete ${modelName}`}
+                              >
+                                {busy ? (
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                ) : (
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                )}
+                              </button>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="space-y-1">
+                    <p className="text-[11px] text-muted-foreground">Available to download</p>
+                    <div className="space-y-1">
+                      {localNotDownloadedModels.map((model) => {
+                        const modelName = model.name;
+                        const busy = modelActionStatus[modelName] === "downloading";
+                        return (
+                          <div
+                            key={`catalog-${modelName}`}
+                            className="flex items-center justify-between gap-2 rounded-md border border-border/70 px-2 py-1.5"
+                          >
+                            <span className="text-xs truncate">
+                              {modelName}
+                              <span className="text-muted-foreground"> ({model.sizeLabel})</span>
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                requestDownloadModel(modelName, model.sizeLabel)
+                              }
+                              disabled={!!modelActionStatus[modelName]}
+                              className="h-6 w-6 rounded border border-border inline-flex items-center justify-center hover:bg-muted disabled:opacity-50"
+                              aria-label={`Download ${modelName}`}
+                            >
+                              {busy ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <Download className="h-3.5 w-3.5" />
+                              )}
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </PopoverContent>
+              </Popover>
+            ) : (
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      disabled
+                      className="h-8 w-8 rounded-full border border-border bg-card text-muted-foreground opacity-60 cursor-not-allowed inline-flex items-center justify-center"
+                      aria-label="Manage local models"
+                    >
+                      <Download className="h-4 w-4" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    Local Ollama is not connected. Connect localhost/127.0.0.1 in
+                    Settings to manage downloads.
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            )}
           </div>
           <div className="flex items-center gap-2 justify-self-center">
               <img
@@ -1812,8 +2263,9 @@ export default function Home() {
       <div className="border-t border-border bg-background px-3 py-2 md:px-4 md:py-3">
         <div className="max-w-7xl mx-auto space-y-3">
           <div
-            className={`${selectedModels.length === 1 ? "max-w-none" : "max-w-2xl"} w-full mx-auto flex gap-1.5 flex-wrap justify-center ${isInterModelChatActive ? "opacity-50 pointer-events-none" : ""}`}
+            className={`${selectedModels.length === 1 ? "max-w-none" : "max-w-2xl"} w-full mx-auto overflow-x-auto slim-scrollbar ${isInterModelChatActive ? "opacity-50 pointer-events-none" : ""}`}
           >
+            <div className="flex w-max min-w-full gap-1.5 md:w-full md:flex-wrap justify-start md:justify-center">
             {availableModels.map((model) => {
               const hostLabel = model.hostUrl.replace(/^https?:\/\//, "");
               const chipLabel = truncateMiddle(`${model.modelName}@${hostLabel}`, 22);
@@ -1832,7 +2284,7 @@ export default function Home() {
                         isSelected
                           ? "bg-primary text-primary-foreground border-primary"
                           : "bg-card text-foreground border-border"
-                      }`}
+                      } shrink-0`}
                     >
                       <button
                         onClick={() => toggleModel(model.modelRef)}
@@ -1879,6 +2331,7 @@ export default function Home() {
                 </HoverCard>
               );
             })}
+            </div>
           </div>
 
           {selectedModels.length > 0 && (
@@ -2005,7 +2458,11 @@ export default function Home() {
                 </button>
                 <div className="relative flex-1">
                 <Textarea
-                  placeholder="Ask something... (use @model to target one or more selected models)"
+                  placeholder={
+                    isMobileViewport
+                      ? "Ask something..."
+                      : "Ask something... (use @model to target one or more selected models)"
+                  }
                   value={userInput}
                   onChange={(e) => {
                     setUserInput(e.target.value);
@@ -2107,7 +2564,78 @@ export default function Home() {
         sessions={chatSessionItems}
         activeSessionId={activeChatId}
         onSelectSession={switchToChat}
+        onDeleteSession={(chatId) => setPendingDeleteChatId(chatId)}
         onNewChat={startNewChat}
+      />
+
+      <ConfirmDlg
+        open={!!pendingModelConfirm}
+        onOpenChange={(open) => {
+          if (!open) setPendingModelConfirm(null);
+        }}
+        title={
+          pendingModelConfirm?.action === "delete"
+            ? "Delete local model?"
+            : "Download model?"
+        }
+        description={
+          pendingModelConfirm
+            ? pendingModelConfirm.action === "delete"
+              ? `Delete ${pendingModelConfirm.modelName}${pendingModelConfirm.sizeLabel ? ` (${pendingModelConfirm.sizeLabel})` : ""} from local Ollama? This action cannot be undone.`
+              : `Download ${pendingModelConfirm.modelName}${pendingModelConfirm.sizeLabel ? ` (${pendingModelConfirm.sizeLabel})` : ""}? This may take some time depending on your internet speed.`
+            : ""
+        }
+        confirmText={pendingModelConfirm?.action === "delete" ? "Delete" : "Download"}
+        confirmClassName={
+          pendingModelConfirm?.action === "delete"
+            ? "bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            : undefined
+        }
+        onConfirm={() => void confirmPendingModelAction()}
+      />
+
+      <ConfirmDlg
+        open={!!chatRouteAlert}
+        onOpenChange={(open) => {
+          if (!open) setChatRouteAlert(null);
+        }}
+        title="Chat not found"
+        description={
+          chatRouteAlert
+            ? `No chat exists for chatid "${chatRouteAlert.requestedId}". Opened a new chat instead.`
+            : ""
+        }
+        confirmText="OK"
+        hideCancel
+        onConfirm={() => setChatRouteAlert(null)}
+      />
+
+      <ConfirmDlg
+        open={pendingClearChatsConfirm}
+        onOpenChange={setPendingClearChatsConfirm}
+        title="Clear saved chats?"
+        description="This will remove all locally saved chat history for this app."
+        confirmText="Clear"
+        onConfirm={() => {
+          clearPersistedData();
+          setPendingClearChatsConfirm(false);
+        }}
+      />
+
+      <ConfirmDlg
+        open={!!pendingDeleteChatId}
+        onOpenChange={(open) => {
+          if (!open) setPendingDeleteChatId(null);
+        }}
+        title="Delete chat?"
+        description="This chat will be removed from local history."
+        confirmText="Delete"
+        confirmClassName="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+        onConfirm={() => {
+          if (!pendingDeleteChatId) return;
+          deleteChatSession(pendingDeleteChatId);
+          setPendingDeleteChatId(null);
+        }}
       />
 
       <SettingsDrawer
@@ -2181,7 +2709,7 @@ export default function Home() {
             chatConfigMaxOutputLength: value,
           }))
         }
-        onClearSavedChats={clearPersistedData}
+        onClearSavedChats={() => setPendingClearChatsConfirm(true)}
         canInstallPwa={canInstallPwa}
         canUpdatePwa={canUpdatePwa}
         isUpdatingPwa={isUpdatingPwa}

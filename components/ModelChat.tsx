@@ -211,7 +211,12 @@ export default function ModelChat({
       <div className="px-3 py-2 border-b border-border/70 bg-card flex items-center justify-between">
         <div className="flex items-center gap-2 min-w-0 flex-wrap">
           <span className="h-1.5 w-1.5 rounded-full bg-primary/80 shrink-0" />
-          <h3 className="font-medium text-foreground text-xs truncate">{model}</h3>
+          <h3
+            className="font-medium text-foreground text-xs truncate max-w-[20ch] md:max-w-none"
+            title={model}
+          >
+            {model}
+          </h3>
           {enableRoleAssignment && (
             <button
               type="button"

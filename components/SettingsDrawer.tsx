@@ -279,6 +279,7 @@ export default function SettingsDrawer({
               variant="outline"
               size="sm"
               onClick={onClearSavedChats}
+              className="w-full justify-center"
             >
               <Trash2 className="h-4 w-4 mr-1" />
               Clear saved chats
@@ -290,6 +291,7 @@ export default function SettingsDrawer({
               size="sm"
               onClick={onInstallPwa}
               disabled={!canInstallPwa}
+              className="w-full justify-center"
               title={
                 canInstallPwa
                   ? "Install this app"
@@ -306,6 +308,7 @@ export default function SettingsDrawer({
               size="sm"
               onClick={onUpdatePwa}
               disabled={!canUpdatePwa || isUpdatingPwa}
+              className="w-full justify-center"
               title={
                 canUpdatePwa
                   ? "Update installed app to latest version"

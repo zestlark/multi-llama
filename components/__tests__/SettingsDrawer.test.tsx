@@ -190,7 +190,9 @@ describe("SettingsDrawer", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: "Install app" })).toBeDisabled();
+    const installButton = screen.getByRole("button", { name: "Install app" });
+    expect(installButton).toBeDisabled();
+    expect(installButton.className).toContain("w-full");
   });
 
   it("enables update app button only when update is available", async () => {
@@ -220,6 +222,7 @@ describe("SettingsDrawer", () => {
 
     const updateButton = screen.getByRole("button", { name: "Update app" });
     expect(updateButton).toBeEnabled();
+    expect(updateButton.className).toContain("w-full");
     await user.click(updateButton);
     expect(onUpdatePwa).toHaveBeenCalledTimes(1);
   });
