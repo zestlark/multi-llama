@@ -22,6 +22,7 @@ const baseProps = {
   onHostUrlChange: vi.fn(),
   onHostUrlBlur: vi.fn(),
   onTestHostConnection: vi.fn(),
+  onOpenNetworkScan: vi.fn(),
   onPersistDataChange: vi.fn(),
   onEnableRolesChange: vi.fn(),
   onAllowSameModelMultiChatChange: vi.fn(),
@@ -55,6 +56,22 @@ describe("SettingsDrawer", () => {
 
     await user.click(screen.getByRole("button", { name: "Test host 1" }));
     expect(onTestHostConnection).toHaveBeenCalledWith("h1");
+  });
+
+  it("opens network scan from settings action", async () => {
+    const user = userEvent.setup();
+    const onOpenNetworkScan = vi.fn();
+
+    render(
+      <SettingsDrawer
+        {...baseProps}
+        settings={settings}
+        onOpenNetworkScan={onOpenNetworkScan}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Scan network for Ollama hosts" }));
+    expect(onOpenNetworkScan).toHaveBeenCalledTimes(1);
   });
 
   it("shows subtle green border for connected host", () => {

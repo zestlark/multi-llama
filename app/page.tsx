@@ -28,153 +28,67 @@ import {
 } from "lucide-react";
 import ModelChat from "@/components/ModelChat";
 import SettingsDrawer from "@/components/SettingsDrawer";
+import NetworkScanDialog from "@/components/NetworkScanDialog";
 import OnboardingDialog from "@/components/OnboardingDialog";
 import OllamaSetupAlertDialog from "@/components/OllamaSetupAlertDialog";
 import ChatHistoryDrawer from "@/components/ChatHistoryDrawer";
+import {
+  HoverCard,
+  HoverCardContent,
+  HoverCardTrigger,
+} from "@/components/ui/hover-card";
 import {
   applyOutputLengthLimit,
   buildPromptWithChatConfiguration,
   normalizeChatConfiguration,
 } from "@/lib/chat-config";
 import { detectClientOs } from "@/lib/device";
+import { usePwaLifecycle } from "@/hooks/use-pwa-lifecycle";
+import { useNetworkScan } from "@/hooks/use-network-scan";
+import {
+  BUILT_IN_ROLES,
+  CHAT_STATE_STORAGE_KEY,
+  DEFAULT_ROLE,
+  DEFAULT_SETTINGS,
+  MODEL_INSTANCE_DELIMITER,
+  MODEL_REF_DELIMITER,
+  ONBOARDING_DONE_STORAGE_KEY,
+  PUBLIC_BASE_PATH,
+  SETTINGS_STORAGE_KEY,
+  createChatSession,
+} from "@/lib/app-config";
+import type {
+  Attachment,
+  AvailableModelOption,
+  ChatSession,
+  HostConnectionStatus,
+  Message,
+  ModelChatData,
+  OllamaChatMessage,
+  PersistedChatState,
+  UserSettings,
+} from "@/lib/app-types";
+import {
+  normalizeOllamaBaseUrl,
+} from "@/lib/network-scan";
+import { normalizeRoleLabel } from "@/lib/model-roles";
 
-interface Message {
-  role: "user" | "assistant";
-  content: string;
-}
+const truncateMiddle = (value: string, maxLength = 22) => {
+  if (value.length <= maxLength) return value;
+  const side = Math.max(3, Math.floor((maxLength - 3) / 2));
+  return `${value.slice(0, side)}...${value.slice(value.length - side)}`;
+};
 
-interface ModelChatData {
-  modelName: string;
-  messages: Message[];
-  isLoading: boolean;
-}
-
-interface UserSettings {
-  hosts: Array<{ id: string; url: string }>;
-  persistDataLocally: boolean;
-  enableRoles: boolean;
-  allowSameModelMultiChat: boolean;
-  chatConfigEnabled: boolean;
-  chatConfigPrePrompt: string;
-  chatConfigPostPrompt: string;
-  chatConfigMaxOutputLength: number | null;
-}
-
-type HostConnectionStatus = "idle" | "testing" | "connected" | "failed";
-
-interface AvailableModelOption {
-  hostId: string;
-  hostUrl: string;
-  modelName: string;
-  modelRef: string;
-}
-
-interface PersistedChatState {
-  chatSessions?: ChatSession[];
-  activeChatId?: string;
-  selectedModels?: string[];
-  modelChats?: Record<string, ModelChatData>;
-  modelRoles?: Record<string, string>;
-  roleLibrary?: string[];
-}
-
-interface ChatSession {
-  id: string;
-  title: string;
-  createdAt: number;
-  updatedAt: number;
-  selectedModels: string[];
-  modelChats: Record<string, ModelChatData>;
-  modelRoles: Record<string, string>;
-}
-
-interface Attachment {
-  id: string;
-  name: string;
-  mimeType: string;
-  kind: "image" | "text";
-  textContent?: string;
-  base64Content?: string;
-}
-
-interface BeforeInstallPromptEvent extends Event {
-  prompt: () => Promise<void>;
-  userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
-}
-
-interface OllamaChatMessage {
-  role: "system" | "user" | "assistant";
-  content: string;
-  images?: string[];
-}
-
-const normalizeOllamaBaseUrl = (raw: string) => {
-  const trimmed = raw.trim();
-  if (!trimmed) return "";
-  const withProtocol = /^https?:\/\//i.test(trimmed)
-    ? trimmed
-    : `http://${trimmed}`;
-  try {
-    const parsed = new URL(withProtocol);
-    // Hosted browser access to local Ollama is more reliable with 127.0.0.1
-    // than localhost on some systems/policies.
-    if (parsed.hostname === "localhost") {
-      parsed.hostname = "127.0.0.1";
-    }
-    // Guard against a common misconfiguration where app dev-server ports
-    // are entered as Ollama host.
-    const isLocalHost =
-      parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost";
-    if (isLocalHost && (parsed.port === "3000" || parsed.port === "5173")) {
-      parsed.port = "11434";
-    }
-    return parsed.toString().replace(/\/+$/, "");
-  } catch {
-    return withProtocol.replace(/\/+$/, "");
+const formatBytes = (bytes?: number) => {
+  if (!bytes || !Number.isFinite(bytes) || bytes <= 0) return "-";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let idx = 0;
+  while (value >= 1024 && idx < units.length - 1) {
+    value /= 1024;
+    idx += 1;
   }
-};
-
-const SETTINGS_STORAGE_KEY = "multi_llama_settings_v1";
-const CHAT_STATE_STORAGE_KEY = "multi_llama_chat_state_v1";
-const ONBOARDING_DONE_STORAGE_KEY = "multi_llama_onboarding_done_v1";
-const PUBLIC_BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH || "";
-const DEFAULT_ROLE = "general";
-const MODEL_INSTANCE_DELIMITER = "::instance::";
-const MODEL_REF_DELIMITER = "::host_model::";
-const BUILT_IN_ROLES = [
-  "general",
-  "tester",
-  "designer",
-  "pm",
-  "developer",
-  "reviewer",
-  "architect",
-  "analyst",
-];
-const DEFAULT_SETTINGS: UserSettings = {
-  hosts: [{ id: "host-local", url: "http://127.0.0.1:11434" }],
-  persistDataLocally: true,
-  enableRoles: true,
-  allowSameModelMultiChat: true,
-  chatConfigEnabled: false,
-  chatConfigPrePrompt: "",
-  chatConfigPostPrompt: "",
-  chatConfigMaxOutputLength: null,
-};
-
-const createChatSession = (
-  seed?: Partial<Pick<ChatSession, "selectedModels" | "modelChats" | "modelRoles" | "title">>,
-): ChatSession => {
-  const now = Date.now();
-  return {
-    id: `chat-${now}-${Math.random().toString(36).slice(2, 7)}`,
-    title: seed?.title || "New chat",
-    createdAt: now,
-    updatedAt: now,
-    selectedModels: seed?.selectedModels || [],
-    modelChats: seed?.modelChats || {},
-    modelRoles: seed?.modelRoles || {},
-  };
+  return `${value.toFixed(value >= 10 || idx === 0 ? 0 : 1)} ${units[idx]}`;
 };
 
 export default function Home() {
@@ -195,13 +109,9 @@ export default function Home() {
   const [didCopyInstallCommand, setDidCopyInstallCommand] = useState(false);
   const [didCopyNetworkCommand, setDidCopyNetworkCommand] = useState(false);
   const [isHydrated, setIsHydrated] = useState(false);
-  const [installPromptEvent, setInstallPromptEvent] =
-    useState<BeforeInstallPromptEvent | null>(null);
-  const [canInstallPwa, setCanInstallPwa] = useState(false);
-  const [waitingServiceWorker, setWaitingServiceWorker] =
-    useState<ServiceWorker | null>(null);
-  const [canUpdatePwa, setCanUpdatePwa] = useState(false);
-  const [isUpdatingPwa, setIsUpdatingPwa] = useState(false);
+  const { canInstallPwa, canUpdatePwa, isUpdatingPwa, installPwa, updatePwa } =
+    usePwaLifecycle(PUBLIC_BASE_PATH);
+  const [isNetworkScanOpen, setIsNetworkScanOpen] = useState(false);
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
   const [activeChatId, setActiveChatId] = useState<string>("");
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
@@ -390,8 +300,9 @@ export default function Home() {
           }),
         );
       }
-      const role = (modelRoles[model] || DEFAULT_ROLE).trim().toLowerCase();
-      if (role && role !== DEFAULT_ROLE) {
+      const roleLabel = normalizeRoleLabel(modelRoles[model] || DEFAULT_ROLE);
+      const role = roleLabel.toLowerCase();
+      if (role && role !== DEFAULT_ROLE.toLowerCase()) {
         built = `Role: ${role}\nInstructions: You must answer as a ${role} and stay consistent with this role.\n\n${built}`;
       }
       return buildPromptWithChatConfiguration(
@@ -418,8 +329,9 @@ export default function Home() {
     (modelKey: string): OllamaChatMessage | null => {
       const systemParts: string[] = [];
       if (settings.enableRoles) {
-        const role = (modelRoles[modelKey] || DEFAULT_ROLE).trim().toLowerCase();
-        if (role && role !== DEFAULT_ROLE) {
+        const roleLabel = normalizeRoleLabel(modelRoles[modelKey] || DEFAULT_ROLE);
+        const role = roleLabel.toLowerCase();
+        if (role && role !== DEFAULT_ROLE.toLowerCase()) {
           systemParts.push(
             `You are participating as a ${role}. Stay consistent with this role.`,
           );
@@ -554,12 +466,35 @@ export default function Home() {
       const response = await fetch(`${hostUrl}/api/tags`);
       if (!response.ok) throw new Error("Failed to fetch models");
       const data = await response.json();
-      const modelNames: string[] = data.models?.map((m: any) => m.name) || [];
-      return modelNames.map((modelName) => ({
+      const models: any[] = Array.isArray(data.models) ? data.models : [];
+      return models.map((model) => ({
         hostId,
         hostUrl,
-        modelName,
-        modelRef: createModelRef(hostId, modelName),
+        modelName: model.name,
+        modelRef: createModelRef(hostId, model.name),
+        size: typeof model.size === "number" ? model.size : undefined,
+        modifiedAt:
+          typeof model.modified_at === "string" ? model.modified_at : undefined,
+        details: model.details
+          ? {
+              family:
+                typeof model.details.family === "string"
+                  ? model.details.family
+                  : undefined,
+              parameterSize:
+                typeof model.details.parameter_size === "string"
+                  ? model.details.parameter_size
+                  : undefined,
+              quantizationLevel:
+                typeof model.details.quantization_level === "string"
+                  ? model.details.quantization_level
+                  : undefined,
+              format:
+                typeof model.details.format === "string"
+                  ? model.details.format
+                  : undefined,
+            }
+          : undefined,
       }));
     },
     [createModelRef],
@@ -718,7 +653,7 @@ export default function Home() {
         const loadedRoleLibrary = Array.isArray(parsed.roleLibrary)
           ? parsed.roleLibrary.filter(
               (v): v is string => typeof v === "string" && !!v.trim(),
-            )
+            ).map((role) => normalizeRoleLabel(role))
           : [];
 
         const loadedSessions = Array.isArray(parsed.chatSessions)
@@ -748,7 +683,13 @@ export default function Home() {
           const activeSession = loadedSessions.find((s) => s.id === activeId) || loadedSessions[0];
           setSelectedModels(activeSession.selectedModels || []);
           setModelChats(activeSession.modelChats || {});
-          setModelRoles(activeSession.modelRoles || {});
+          const normalizedRoles = Object.fromEntries(
+            Object.entries(activeSession.modelRoles || {}).map(([k, v]) => [
+              k,
+              normalizeRoleLabel(String(v || DEFAULT_ROLE)),
+            ]),
+          );
+          setModelRoles(normalizedRoles);
         } else {
           const loadedSelected = Array.isArray(parsed.selectedModels)
             ? parsed.selectedModels.filter((v): v is string => typeof v === "string")
@@ -766,7 +707,13 @@ export default function Home() {
           setActiveChatId(migratedSession.id);
           setSelectedModels(migratedSession.selectedModels);
           setModelChats(migratedSession.modelChats);
-          setModelRoles(migratedSession.modelRoles);
+          const normalizedMigratedRoles = Object.fromEntries(
+            Object.entries(migratedSession.modelRoles || {}).map(([k, v]) => [
+              k,
+              normalizeRoleLabel(String(v || DEFAULT_ROLE)),
+            ]),
+          );
+          setModelRoles(normalizedMigratedRoles);
         }
 
         if (loadedRoleLibrary.length > 0) {
@@ -850,97 +797,6 @@ export default function Home() {
     roleLibrary,
   ]);
 
-  useEffect(() => {
-    if (!("serviceWorker" in navigator)) return;
-    if (process.env.NODE_ENV !== "production") {
-      navigator.serviceWorker.getRegistrations().then((registrations) => {
-        registrations.forEach((registration) => registration.unregister());
-      });
-      caches.keys().then((keys) => {
-        keys.forEach((key) => caches.delete(key));
-      });
-      return;
-    }
-
-    const markUpdateAvailable = (worker: ServiceWorker) => {
-      setWaitingServiceWorker(worker);
-      setCanUpdatePwa(true);
-      toast.info("App update available", {
-        description: "Open Settings and click Update app to load the latest version.",
-      });
-    };
-
-    const registerServiceWorker = () => {
-      navigator.serviceWorker
-        .register(`${PUBLIC_BASE_PATH}/sw.js`)
-        .then((registration) => {
-          if (registration.waiting) {
-            markUpdateAvailable(registration.waiting);
-          }
-
-          registration.addEventListener("updatefound", () => {
-            const installing = registration.installing;
-            if (!installing) return;
-            installing.addEventListener("statechange", () => {
-              if (
-                installing.state === "installed" &&
-                navigator.serviceWorker.controller
-              ) {
-                markUpdateAvailable(installing);
-              }
-            });
-          });
-        })
-        .catch((error) =>
-          console.error("[v0] Failed to register service worker:", error),
-        );
-    };
-
-    const handleControllerChange = () => {
-      window.location.reload();
-    };
-    navigator.serviceWorker.addEventListener(
-      "controllerchange",
-      handleControllerChange,
-    );
-
-    if (document.readyState === "complete") {
-      registerServiceWorker();
-      return;
-    }
-
-    window.addEventListener("load", registerServiceWorker);
-    return () => {
-      window.removeEventListener("load", registerServiceWorker);
-      navigator.serviceWorker.removeEventListener(
-        "controllerchange",
-        handleControllerChange,
-      );
-    };
-  }, []);
-
-  useEffect(() => {
-    const handleBeforeInstallPrompt = (event: Event) => {
-      event.preventDefault();
-      setInstallPromptEvent(event as BeforeInstallPromptEvent);
-      setCanInstallPwa(true);
-    };
-
-    const handleAppInstalled = () => {
-      setInstallPromptEvent(null);
-      setCanInstallPwa(false);
-    };
-
-    window.addEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
-    window.addEventListener("appinstalled", handleAppInstalled);
-    return () => {
-      window.removeEventListener(
-        "beforeinstallprompt",
-        handleBeforeInstallPrompt,
-      );
-      window.removeEventListener("appinstalled", handleAppInstalled);
-    };
-  }, []);
 
   const clearPersistedData = useCallback(() => {
     localStorage.removeItem(CHAT_STATE_STORAGE_KEY);
@@ -982,22 +838,6 @@ export default function Home() {
     },
     [chatSessions],
   );
-
-  const installPwa = useCallback(async () => {
-    if (!installPromptEvent) return;
-    await installPromptEvent.prompt();
-    await installPromptEvent.userChoice;
-    setInstallPromptEvent(null);
-    setCanInstallPwa(false);
-  }, [installPromptEvent]);
-
-  const updatePwa = useCallback(async () => {
-    if (!waitingServiceWorker) return;
-    setIsUpdatingPwa(true);
-    waitingServiceWorker.postMessage({ type: "SKIP_WAITING" });
-    setCanUpdatePwa(false);
-    setWaitingServiceWorker(null);
-  }, [waitingServiceWorker]);
 
   const copyInstallCommand = useCallback(async () => {
     try {
@@ -1116,6 +956,22 @@ export default function Home() {
     [normalizedHosts, fetchModelsFromHost],
   );
 
+  const {
+    isNetworkScanning,
+    scannedHosts,
+    scanErrorMessage,
+    addedScannedHostUrls,
+    startNetworkScan,
+    addScannedHost,
+  } = useNetworkScan({
+    normalizedHosts,
+    fetchModelsFromHost,
+    setSettings,
+    setHostStatuses,
+    setAvailableModels,
+    setOllamaError,
+  });
+
   const completeOnboarding = useCallback(async () => {
     localStorage.setItem(ONBOARDING_DONE_STORAGE_KEY, "true");
     setIsOnboardingOpen(false);
@@ -1216,14 +1072,17 @@ export default function Home() {
   );
 
   const updateModelRole = useCallback((model: string, role: string) => {
-    const normalized = role.trim().toLowerCase() || DEFAULT_ROLE;
+    const normalized = normalizeRoleLabel(role);
     setModelRoles((prev) => ({
       ...prev,
       [model]: normalized,
     }));
-    setRoleLibrary((prev) =>
-      prev.includes(normalized) ? prev : [...prev, normalized],
-    );
+    setRoleLibrary((prev) => {
+      const alreadyExists = prev.some(
+        (item) => item.toLowerCase() === normalized.toLowerCase(),
+      );
+      return alreadyExists ? prev : [...prev, normalized];
+    });
   }, []);
 
   const sendMessage = useCallback(async () => {
@@ -1607,7 +1466,7 @@ export default function Home() {
             /^https?:\/\//,
             "",
           );
-          const displayName = `${getBaseModelName(model)} @ ${hostLabel}`;
+          const displayName = `${getBaseModelName(model)}@${hostLabel}`;
           const latest = transcript[transcript.length - 1];
           const interPrompt = `Inter-model conversation transcript:\n${transcript
             .map((t, idx) => `${idx + 1}. ${t.speaker}: ${t.content}`)
@@ -1757,7 +1616,7 @@ export default function Home() {
       const compactHost = hostLabel.replace(/^https?:\/\//, "");
       seenCount[base] = (seenCount[base] || 0) + 1;
       const instanceLabel = totalCount[base] > 1 ? ` (${seenCount[base]})` : "";
-      out[modelKey] = `${modelName}${instanceLabel} @ ${compactHost}`;
+      out[modelKey] = `${modelName}${instanceLabel}@${compactHost}`;
     });
     return out;
   }, [selectedModels, getBaseModelRef, parseModelRef, normalizedHosts]);
@@ -1957,39 +1816,67 @@ export default function Home() {
           >
             {availableModels.map((model) => {
               const hostLabel = model.hostUrl.replace(/^https?:\/\//, "");
+              const chipLabel = truncateMiddle(`${model.modelName}@${hostLabel}`, 22);
+              const modifiedDate = model.modifiedAt
+                ? new Date(model.modifiedAt).toLocaleString()
+                : "-";
               const instanceCount = selectedModels.filter(
                 (modelKey) => getBaseModelRef(modelKey) === model.modelRef,
               ).length;
               const isSelected = instanceCount > 0;
               return (
-                <div
-                  key={model.modelRef}
-                  className={`inline-flex items-center rounded-full border text-sm transition-colors overflow-hidden ${
-                    isSelected
-                      ? "bg-primary text-primary-foreground border-primary"
-                      : "bg-card text-foreground border-border"
-                  }`}
-                >
-                  <button
-                    onClick={() => toggleModel(model.modelRef)}
-                    className={`px-3 py-1 ${!isSelected ? "hover:bg-muted/40" : ""} max-w-[260px] truncate`}
-                    aria-label={`Toggle ${model.modelName} on ${hostLabel}`}
-                  >
-                    {model.modelName} <span className="opacity-80">@{hostLabel}</span>
-                    {instanceCount > 1 ? ` x${instanceCount}` : ""}
-                  </button>
-                  {settings.allowSameModelMultiChat && isSelected && (
-                    <button
-                      type="button"
-                      onClick={() => addModelInstance(model.modelRef)}
-                      disabled={isInterModelSelected || isInterModelChatActive}
-                      className="h-full px-2.5 py-1 border-l border-primary-foreground/30 text-sm leading-none hover:bg-primary-foreground/15 disabled:opacity-50 disabled:cursor-not-allowed"
-                      aria-label={`Add another ${model.modelName}`}
+                <HoverCard key={model.modelRef} openDelay={140}>
+                  <HoverCardTrigger asChild>
+                    <div
+                      className={`inline-flex items-center rounded-full border text-sm transition-colors overflow-hidden ${
+                        isSelected
+                          ? "bg-primary text-primary-foreground border-primary"
+                          : "bg-card text-foreground border-border"
+                      }`}
                     >
-                      +
-                    </button>
-                  )}
-                </div>
+                      <button
+                        onClick={() => toggleModel(model.modelRef)}
+                        className={`px-3 py-1 ${!isSelected ? "hover:bg-muted/40" : ""} max-w-[260px] truncate`}
+                        aria-label={`Toggle ${model.modelName} on ${hostLabel}`}
+                        title={`${model.modelName}@${hostLabel}`}
+                      >
+                        {chipLabel}
+                        {instanceCount > 1 ? ` x${instanceCount}` : ""}
+                      </button>
+                      {settings.allowSameModelMultiChat && isSelected && (
+                        <button
+                          type="button"
+                          onClick={() => addModelInstance(model.modelRef)}
+                          disabled={isInterModelSelected || isInterModelChatActive}
+                          className="h-full px-2.5 py-1 border-l border-primary-foreground/30 text-sm leading-none hover:bg-primary-foreground/15 disabled:opacity-50 disabled:cursor-not-allowed"
+                          aria-label={`Add another ${model.modelName}`}
+                        >
+                          +
+                        </button>
+                      )}
+                    </div>
+                  </HoverCardTrigger>
+                  <HoverCardContent align="center" className="w-72 space-y-2">
+                    <div className="space-y-0.5">
+                      <p className="text-sm font-medium text-foreground">{model.modelName}</p>
+                      <p className="text-xs text-muted-foreground break-all">@{hostLabel}</p>
+                    </div>
+                    <div className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-xs">
+                      <span className="text-muted-foreground">Size</span>
+                      <span>{formatBytes(model.size)}</span>
+                      <span className="text-muted-foreground">Family</span>
+                      <span>{model.details?.family || "-"}</span>
+                      <span className="text-muted-foreground">Params</span>
+                      <span>{model.details?.parameterSize || "-"}</span>
+                      <span className="text-muted-foreground">Quant</span>
+                      <span>{model.details?.quantizationLevel || "-"}</span>
+                      <span className="text-muted-foreground">Format</span>
+                      <span>{model.details?.format || "-"}</span>
+                      <span className="text-muted-foreground">Updated</span>
+                      <span>{modifiedDate}</span>
+                    </div>
+                  </HoverCardContent>
+                </HoverCard>
               );
             })}
           </div>
@@ -2249,6 +2136,9 @@ export default function Home() {
           }))
         }
         onTestHostConnection={testHostConnection}
+        onOpenNetworkScan={() => {
+          setIsNetworkScanOpen(true);
+        }}
         onPersistDataChange={(checked) =>
           setSettings((prev) => ({
             ...prev,
@@ -2297,6 +2187,18 @@ export default function Home() {
         isUpdatingPwa={isUpdatingPwa}
         onInstallPwa={installPwa}
         onUpdatePwa={updatePwa}
+      />
+
+      <NetworkScanDialog
+        open={isNetworkScanOpen}
+        onOpenChange={setIsNetworkScanOpen}
+        isScanning={isNetworkScanning}
+        scanError={scanErrorMessage}
+        items={scannedHosts}
+        configuredHostUrls={normalizedHosts.map((host) => host.url)}
+        addedHostUrls={addedScannedHostUrls}
+        onScan={startNetworkScan}
+        onAddHost={addScannedHost}
       />
 
       <OnboardingDialog

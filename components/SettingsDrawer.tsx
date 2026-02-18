@@ -8,25 +8,8 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { Download, Link2, Loader2, Plus, RefreshCw, Trash2 } from "lucide-react";
-
-interface HostSettingsItem {
-  id: string;
-  url: string;
-}
-
-type HostConnectionStatus = "idle" | "testing" | "connected" | "failed";
-
-interface UserSettings {
-  hosts: HostSettingsItem[];
-  persistDataLocally: boolean;
-  enableRoles: boolean;
-  allowSameModelMultiChat: boolean;
-  chatConfigEnabled: boolean;
-  chatConfigPrePrompt: string;
-  chatConfigPostPrompt: string;
-  chatConfigMaxOutputLength: number | null;
-}
+import { Download, Link2, Loader2, Plus, Radar, RefreshCw, Trash2 } from "lucide-react";
+import type { HostConnectionStatus, UserSettings } from "@/lib/app-types";
 
 interface SettingsDrawerProps {
   open: boolean;
@@ -38,6 +21,7 @@ interface SettingsDrawerProps {
   onHostUrlChange: (hostId: string, value: string) => void;
   onHostUrlBlur: (hostId: string) => void;
   onTestHostConnection: (hostId: string) => void | Promise<void>;
+  onOpenNetworkScan: () => void;
   onPersistDataChange: (checked: boolean) => void;
   onEnableRolesChange: (checked: boolean) => void;
   onAllowSameModelMultiChatChange: (checked: boolean) => void;
@@ -63,6 +47,7 @@ export default function SettingsDrawer({
   onHostUrlChange,
   onHostUrlBlur,
   onTestHostConnection,
+  onOpenNetworkScan,
   onPersistDataChange,
   onEnableRolesChange,
   onAllowSameModelMultiChatChange,
@@ -165,6 +150,17 @@ export default function SettingsDrawer({
             </div>
 
           </div>
+
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-9 w-full justify-start border-border/70 bg-muted/20 hover:bg-muted/30"
+            onClick={onOpenNetworkScan}
+          >
+            <Radar className="h-4 w-4 mr-2" />
+            Scan network for Ollama hosts
+          </Button>
 
           <div className="rounded-md border border-border/70 bg-muted/20 p-3 space-y-3">
             <div className="flex items-center justify-between gap-3">
