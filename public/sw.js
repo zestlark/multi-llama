@@ -1,17 +1,20 @@
-const CACHE_NAME = "multi-llama-chat-v2";
+const CACHE_NAME = "multi-llama-chat-v0.1.1";
 const SCOPE_PATH = new URL(self.registration.scope).pathname.replace(/\/$/, "");
 const scoped = (path) => `${SCOPE_PATH}${path}`;
 const APP_SHELL = [
   scoped("/"),
   scoped("/manifest.webmanifest"),
-  scoped("/placeholder.svg"),
-  scoped("/placeholder-logo.svg"),
+  scoped("/logo-black.png"),
 ];
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)).then(() => self.skipWaiting()),
-  );
+  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)));
+});
+
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "SKIP_WAITING") {
+    self.skipWaiting();
+  }
 });
 
 self.addEventListener("activate", (event) => {

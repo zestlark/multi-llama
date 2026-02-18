@@ -17,11 +17,32 @@ export const metadata: Metadata = {
   manifest: `${PUBLIC_BASE_PATH}/manifest.webmanifest`,
   icons: {
     icon: [
+      {
+        url: `${PUBLIC_BASE_PATH}/logo-black.png`,
+        type: 'image/png',
+        media: '(prefers-color-scheme: light)',
+      },
+      {
+        url: `${PUBLIC_BASE_PATH}/logo.png`,
+        type: 'image/png',
+        media: '(prefers-color-scheme: dark)',
+      },
       { url: `${PUBLIC_BASE_PATH}/icon-192.png`, sizes: '192x192', type: 'image/png' },
       { url: `${PUBLIC_BASE_PATH}/icon-512.png`, sizes: '512x512', type: 'image/png' },
     ],
     apple: `${PUBLIC_BASE_PATH}/icon-192.png`,
-    shortcut: `${PUBLIC_BASE_PATH}/icon-192.png`,
+    shortcut: [
+      {
+        url: `${PUBLIC_BASE_PATH}/logo-black.png`,
+        type: 'image/png',
+        media: '(prefers-color-scheme: light)',
+      },
+      {
+        url: `${PUBLIC_BASE_PATH}/logo.png`,
+        type: 'image/png',
+        media: '(prefers-color-scheme: dark)',
+      },
+    ],
   },
 }
 

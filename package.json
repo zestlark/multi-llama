@@ -1,9 +1,11 @@
 {
   "name": "my-project",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "pwa:sync-version": "node scripts/sync-pwa-version.mjs",
+    "prebuild": "npm run pwa:sync-version",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",

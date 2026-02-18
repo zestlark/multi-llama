@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -16,10 +16,13 @@ concurrency:
 
 jobs:
   build:
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -27,8 +30,45 @@ jobs:
           node-version: "20"
           cache: "npm"
 
+      - name: Detect version bump type
+        id: bump
+        run: |
+          RANGE="${{ github.event.before }}..${{ github.sha }}"
+          if [ "${{ github.event.before }}" = "0000000000000000000000000000000000000000" ]; then
+            RANGE="${{ github.sha }}"
+          fi
+
+          COMMITS="$(git log --format=%B $RANGE)"
+          BUMP="patch"
+
+          if echo "$COMMITS" | grep -Eiq "(BREAKING CHANGE|#major|major:)"; then
+            BUMP="major"
+          elif echo "$COMMITS" | grep -Eiq "(^feat(\(|:)|#minor|minor:)"; then
+            BUMP="minor"
+          fi
+
+          echo "type=$BUMP" >> "$GITHUB_OUTPUT"
+          echo "Detected bump type: $BUMP"
+
       - name: Install dependencies
         run: npm ci
+
+      - name: Bump package version
+        id: version
+        run: |
+          npm version "${{ steps.bump.outputs.type }}" --no-git-tag-version
+          echo "new=$(node -p \"require('./package.json').version\")" >> "$GITHUB_OUTPUT"
+
+      - name: Sync PWA version with app version
+        run: npm run pwa:sync-version
+
+      - name: Commit and push version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json public/sw.js public/manifest.webmanifest
+          git commit -m "chore: bump version to v${{ steps.version.outputs.new }}"
+          git push
 
       - name: Run tests (must pass)
         run: npm run test:ci

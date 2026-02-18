@@ -18,6 +18,7 @@ interface OllamaSetupAlertDialogProps {
   didCopyInstallCommand: boolean;
   didCopyNetworkCommand: boolean;
   ollamaNetworkCommand: string;
+  ollamaNetworkCommandLabel: string;
   onCopyInstallCommand: () => void;
   onCopyNetworkCommand: () => void;
   onOpenSettings: () => void;
@@ -30,6 +31,7 @@ export default function OllamaSetupAlertDialog({
   didCopyInstallCommand,
   didCopyNetworkCommand,
   ollamaNetworkCommand,
+  ollamaNetworkCommandLabel,
   onCopyInstallCommand,
   onCopyNetworkCommand,
   onOpenSettings,
@@ -88,7 +90,9 @@ export default function OllamaSetupAlertDialog({
               </button>
             </p>
             <div className="space-y-1.5">
-              <p>5. Start Ollama for browser/network access:</p>
+              <p>
+                5. Start Ollama for browser/network access ({ollamaNetworkCommandLabel}):
+              </p>
               <div className="rounded-md border border-border bg-background/60 px-2.5 py-2 text-xs break-all flex items-start justify-between gap-2">
                 <code className="break-all whitespace-pre-wrap flex-1">
                   {ollamaNetworkCommand}

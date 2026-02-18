@@ -8,7 +8,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { Download, Link2, Loader2, Plus, Trash2 } from "lucide-react";
+import { Download, Link2, Loader2, Plus, RefreshCw, Trash2 } from "lucide-react";
 
 interface HostSettingsItem {
   id: string;
@@ -47,7 +47,10 @@ interface SettingsDrawerProps {
   onChatConfigMaxOutputLengthChange: (value: number | null) => void;
   onClearSavedChats: () => void;
   canInstallPwa: boolean;
+  canUpdatePwa: boolean;
+  isUpdatingPwa: boolean;
   onInstallPwa: () => void;
+  onUpdatePwa: () => void;
 }
 
 export default function SettingsDrawer({
@@ -69,7 +72,10 @@ export default function SettingsDrawer({
   onChatConfigMaxOutputLengthChange,
   onClearSavedChats,
   canInstallPwa,
+  canUpdatePwa,
+  isUpdatingPwa,
   onInstallPwa,
+  onUpdatePwa,
 }: SettingsDrawerProps) {
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -296,6 +302,26 @@ export default function SettingsDrawer({
             >
               <Download className="h-4 w-4 mr-1" />
               Install app
+            </Button>
+
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={onUpdatePwa}
+              disabled={!canUpdatePwa || isUpdatingPwa}
+              title={
+                canUpdatePwa
+                  ? "Update installed app to latest version"
+                  : "No app update available right now"
+              }
+            >
+              {isUpdatingPwa ? (
+                <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+              ) : (
+                <RefreshCw className="h-4 w-4 mr-1" />
+              )}
+              Update app
             </Button>
           </div>
         </div>

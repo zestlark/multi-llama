@@ -44,9 +44,14 @@ export default function OnboardingDialog({
       >
         <DialogHeader>
           <img
+            src={`${publicBasePath}/logo-black.png`}
+            alt="Multi Llama Chat logo"
+            className="h-12 w-12 object-contain mx-auto sm:mx-0 dark:hidden"
+          />
+          <img
             src={`${publicBasePath}/logo.png`}
             alt="Multi Llama Chat logo"
-            className="h-12 w-12 object-contain mx-auto sm:mx-0 invert dark:invert-0"
+            className="hidden h-12 w-12 object-contain mx-auto sm:mx-0 dark:block"
           />
           <DialogTitle>{onboardingSteps[onboardingStep].title}</DialogTitle>
           <DialogDescription>

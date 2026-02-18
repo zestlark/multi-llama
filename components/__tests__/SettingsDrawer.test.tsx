@@ -31,7 +31,10 @@ const baseProps = {
   onChatConfigMaxOutputLengthChange: vi.fn(),
   onClearSavedChats: vi.fn(),
   canInstallPwa: false,
+  canUpdatePwa: false,
+  isUpdatingPwa: false,
   onInstallPwa: vi.fn(),
+  onUpdatePwa: vi.fn(),
 };
 
 describe("SettingsDrawer", () => {
@@ -171,5 +174,36 @@ describe("SettingsDrawer", () => {
     );
 
     expect(screen.getByRole("button", { name: "Install app" })).toBeDisabled();
+  });
+
+  it("enables update app button only when update is available", async () => {
+    const user = userEvent.setup();
+    const onUpdatePwa = vi.fn();
+
+    const { rerender } = render(
+      <SettingsDrawer
+        {...baseProps}
+        settings={settings}
+        canUpdatePwa={false}
+        onUpdatePwa={onUpdatePwa}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Update app" })).toBeDisabled();
+
+    rerender(
+      <SettingsDrawer
+        {...baseProps}
+        settings={settings}
+        canUpdatePwa
+        isUpdatingPwa={false}
+        onUpdatePwa={onUpdatePwa}
+      />,
+    );
+
+    const updateButton = screen.getByRole("button", { name: "Update app" });
+    expect(updateButton).toBeEnabled();
+    await user.click(updateButton);
+    expect(onUpdatePwa).toHaveBeenCalledTimes(1);
   });
 });

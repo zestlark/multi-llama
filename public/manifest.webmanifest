@@ -2,12 +2,26 @@
   "name": "Multi Llama Chat",
   "short_name": "Multi Llama",
   "description": "Chat with multiple AI models simultaneously",
-  "start_url": ".",
+  "start_url": "./?v=0.1.1",
   "scope": ".",
   "display": "standalone",
   "background_color": "#0b0f14",
   "theme_color": "#0b0f14",
   "icons": [
+    {
+      "src": "logo-black.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any",
+      "media": "(prefers-color-scheme: light)"
+    },
+    {
+      "src": "logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any",
+      "media": "(prefers-color-scheme: dark)"
+    },
     {
       "src": "icon-192.png",
       "sizes": "192x192",

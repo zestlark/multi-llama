@@ -18,6 +18,7 @@ import {
   Loader2,
   MessagesSquare,
   Settings2,
+  PanelRightOpen,
   Sun,
   Moon,
   Paperclip,
@@ -29,11 +30,13 @@ import ModelChat from "@/components/ModelChat";
 import SettingsDrawer from "@/components/SettingsDrawer";
 import OnboardingDialog from "@/components/OnboardingDialog";
 import OllamaSetupAlertDialog from "@/components/OllamaSetupAlertDialog";
+import ChatHistoryDrawer from "@/components/ChatHistoryDrawer";
 import {
   applyOutputLengthLimit,
   buildPromptWithChatConfiguration,
   normalizeChatConfiguration,
 } from "@/lib/chat-config";
+import { detectClientOs } from "@/lib/device";
 
 interface Message {
   role: "user" | "assistant";
@@ -67,10 +70,22 @@ interface AvailableModelOption {
 }
 
 interface PersistedChatState {
-  selectedModels: string[];
-  modelChats: Record<string, ModelChatData>;
+  chatSessions?: ChatSession[];
+  activeChatId?: string;
+  selectedModels?: string[];
+  modelChats?: Record<string, ModelChatData>;
   modelRoles?: Record<string, string>;
   roleLibrary?: string[];
+}
+
+interface ChatSession {
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  selectedModels: string[];
+  modelChats: Record<string, ModelChatData>;
+  modelRoles: Record<string, string>;
 }
 
 interface Attachment {
@@ -147,6 +162,21 @@ const DEFAULT_SETTINGS: UserSettings = {
   chatConfigMaxOutputLength: null,
 };
 
+const createChatSession = (
+  seed?: Partial<Pick<ChatSession, "selectedModels" | "modelChats" | "modelRoles" | "title">>,
+): ChatSession => {
+  const now = Date.now();
+  return {
+    id: `chat-${now}-${Math.random().toString(36).slice(2, 7)}`,
+    title: seed?.title || "New chat",
+    createdAt: now,
+    updatedAt: now,
+    selectedModels: seed?.selectedModels || [],
+    modelChats: seed?.modelChats || {},
+    modelRoles: seed?.modelRoles || {},
+  };
+};
+
 export default function Home() {
   const { resolvedTheme, setTheme } = useTheme();
   const [isThemeReady, setIsThemeReady] = useState(false);
@@ -159,6 +189,7 @@ export default function Home() {
   const [settings, setSettings] = useState<UserSettings>(DEFAULT_SETTINGS);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
+  const [isChatHistoryOpen, setIsChatHistoryOpen] = useState(false);
   const [onboardingStep, setOnboardingStep] = useState(0);
   const [showOllamaSetupAlert, setShowOllamaSetupAlert] = useState(false);
   const [didCopyInstallCommand, setDidCopyInstallCommand] = useState(false);
@@ -167,6 +198,12 @@ export default function Home() {
   const [installPromptEvent, setInstallPromptEvent] =
     useState<BeforeInstallPromptEvent | null>(null);
   const [canInstallPwa, setCanInstallPwa] = useState(false);
+  const [waitingServiceWorker, setWaitingServiceWorker] =
+    useState<ServiceWorker | null>(null);
+  const [canUpdatePwa, setCanUpdatePwa] = useState(false);
+  const [isUpdatingPwa, setIsUpdatingPwa] = useState(false);
+  const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
+  const [activeChatId, setActiveChatId] = useState<string>("");
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
   const [modelChats, setModelChats] = useState<Record<string, ModelChatData>>(
     {},
@@ -230,8 +267,20 @@ export default function Home() {
     [settings.hosts],
   );
   const apiBaseUrl = normalizedHosts[0]?.url || "";
+  const clientOs = useMemo(
+    () =>
+      detectClientOs(
+        typeof navigator !== "undefined" ? navigator.platform : "",
+        typeof navigator !== "undefined" ? navigator.userAgent : "",
+      ),
+    [],
+  );
   const ollamaNetworkCommand =
-    'OLLAMA_HOST=0.0.0.0:11434 OLLAMA_ORIGINS="*" ollama serve';
+    clientOs === "windows"
+      ? '$env:OLLAMA_HOST="0.0.0.0:11434"; $env:OLLAMA_ORIGINS="*"; ollama serve'
+      : 'OLLAMA_HOST=0.0.0.0:11434 OLLAMA_ORIGINS="*" ollama serve';
+  const ollamaNetworkCommandLabel =
+    clientOs === "windows" ? "Windows PowerShell" : "macOS / Ubuntu / Linux";
 
   const getBaseModelRef = useCallback((modelKey: string) => {
     const idx = modelKey.indexOf(MODEL_INSTANCE_DELIMITER);
@@ -662,13 +711,6 @@ export default function Home() {
       const rawChatState = localStorage.getItem(CHAT_STATE_STORAGE_KEY);
       if (rawChatState) {
         const parsed = JSON.parse(rawChatState) as Partial<PersistedChatState>;
-        const loadedSelected = Array.isArray(parsed.selectedModels)
-          ? parsed.selectedModels.filter((v): v is string => typeof v === "string")
-          : [];
-        const loadedChats =
-          parsed.modelChats && typeof parsed.modelChats === "object"
-            ? parsed.modelChats
-            : {};
         const loadedRoles =
           parsed.modelRoles && typeof parsed.modelRoles === "object"
             ? parsed.modelRoles
@@ -678,12 +720,62 @@ export default function Home() {
               (v): v is string => typeof v === "string" && !!v.trim(),
             )
           : [];
-        setSelectedModels(loadedSelected);
-        setModelChats(loadedChats);
-        setModelRoles(loadedRoles);
+
+        const loadedSessions = Array.isArray(parsed.chatSessions)
+          ? parsed.chatSessions.filter(
+              (session): session is ChatSession =>
+                !!session &&
+                typeof session.id === "string" &&
+                typeof session.title === "string" &&
+                typeof session.createdAt === "number" &&
+                typeof session.updatedAt === "number" &&
+                Array.isArray(session.selectedModels) &&
+                typeof session.modelChats === "object" &&
+                !!session.modelChats &&
+                typeof session.modelRoles === "object" &&
+                !!session.modelRoles,
+            )
+          : [];
+
+        if (loadedSessions.length > 0) {
+          setChatSessions(loadedSessions);
+          const activeId =
+            typeof parsed.activeChatId === "string" &&
+            loadedSessions.some((s) => s.id === parsed.activeChatId)
+              ? parsed.activeChatId
+              : loadedSessions[0].id;
+          setActiveChatId(activeId);
+          const activeSession = loadedSessions.find((s) => s.id === activeId) || loadedSessions[0];
+          setSelectedModels(activeSession.selectedModels || []);
+          setModelChats(activeSession.modelChats || {});
+          setModelRoles(activeSession.modelRoles || {});
+        } else {
+          const loadedSelected = Array.isArray(parsed.selectedModels)
+            ? parsed.selectedModels.filter((v): v is string => typeof v === "string")
+            : [];
+          const loadedChats =
+            parsed.modelChats && typeof parsed.modelChats === "object"
+              ? parsed.modelChats
+              : {};
+          const migratedSession = createChatSession({
+            selectedModels: loadedSelected,
+            modelChats: loadedChats,
+            modelRoles: loadedRoles,
+          });
+          setChatSessions([migratedSession]);
+          setActiveChatId(migratedSession.id);
+          setSelectedModels(migratedSession.selectedModels);
+          setModelChats(migratedSession.modelChats);
+          setModelRoles(migratedSession.modelRoles);
+        }
+
         if (loadedRoleLibrary.length > 0) {
           setRoleLibrary(Array.from(new Set([...BUILT_IN_ROLES, ...loadedRoleLibrary])));
         }
+      } else {
+        const initialSession = createChatSession();
+        setChatSessions([initialSession]);
+        setActiveChatId(initialSession.id);
       }
 
       const onboardingDone =
@@ -705,6 +797,33 @@ export default function Home() {
   }, [settings, isHydrated]);
 
   useEffect(() => {
+    if (!isHydrated || !activeChatId) return;
+    const nextTitle = (() => {
+      for (const modelKey of selectedModels) {
+        const messages = modelChats[modelKey]?.messages || [];
+        const firstUser = messages.find((m) => m.role === "user" && !!m.content.trim());
+        if (firstUser) return firstUser.content.trim().slice(0, 80);
+      }
+      return "New chat";
+    })();
+
+    setChatSessions((prev) =>
+      prev.map((session) =>
+        session.id === activeChatId
+          ? {
+              ...session,
+              title: nextTitle || "New chat",
+              updatedAt: Date.now(),
+              selectedModels,
+              modelChats,
+              modelRoles,
+            }
+          : session,
+      ),
+    );
+  }, [isHydrated, activeChatId, selectedModels, modelChats, modelRoles]);
+
+  useEffect(() => {
     if (!isHydrated) return;
     if (!settings.persistDataLocally) {
       localStorage.removeItem(CHAT_STATE_STORAGE_KEY);
@@ -712,6 +831,8 @@ export default function Home() {
     }
 
     const payload: PersistedChatState = {
+      chatSessions,
+      activeChatId,
       selectedModels,
       modelChats,
       modelRoles,
@@ -721,6 +842,8 @@ export default function Home() {
   }, [
     isHydrated,
     settings.persistDataLocally,
+    chatSessions,
+    activeChatId,
     selectedModels,
     modelChats,
     modelRoles,
@@ -739,13 +862,47 @@ export default function Home() {
       return;
     }
 
+    const markUpdateAvailable = (worker: ServiceWorker) => {
+      setWaitingServiceWorker(worker);
+      setCanUpdatePwa(true);
+      toast.info("App update available", {
+        description: "Open Settings and click Update app to load the latest version.",
+      });
+    };
+
     const registerServiceWorker = () => {
       navigator.serviceWorker
         .register(`${PUBLIC_BASE_PATH}/sw.js`)
+        .then((registration) => {
+          if (registration.waiting) {
+            markUpdateAvailable(registration.waiting);
+          }
+
+          registration.addEventListener("updatefound", () => {
+            const installing = registration.installing;
+            if (!installing) return;
+            installing.addEventListener("statechange", () => {
+              if (
+                installing.state === "installed" &&
+                navigator.serviceWorker.controller
+              ) {
+                markUpdateAvailable(installing);
+              }
+            });
+          });
+        })
         .catch((error) =>
           console.error("[v0] Failed to register service worker:", error),
         );
     };
+
+    const handleControllerChange = () => {
+      window.location.reload();
+    };
+    navigator.serviceWorker.addEventListener(
+      "controllerchange",
+      handleControllerChange,
+    );
 
     if (document.readyState === "complete") {
       registerServiceWorker();
@@ -753,7 +910,13 @@ export default function Home() {
     }
 
     window.addEventListener("load", registerServiceWorker);
-    return () => window.removeEventListener("load", registerServiceWorker);
+    return () => {
+      window.removeEventListener("load", registerServiceWorker);
+      navigator.serviceWorker.removeEventListener(
+        "controllerchange",
+        handleControllerChange,
+      );
+    };
   }, []);
 
   useEffect(() => {
@@ -781,11 +944,44 @@ export default function Home() {
 
   const clearPersistedData = useCallback(() => {
     localStorage.removeItem(CHAT_STATE_STORAGE_KEY);
-    setSelectedModels([]);
-    setModelChats({});
-    setModelRoles({});
+    const fresh = createChatSession();
+    setChatSessions([fresh]);
+    setActiveChatId(fresh.id);
+    setSelectedModels(fresh.selectedModels);
+    setModelChats(fresh.modelChats);
+    setModelRoles(fresh.modelRoles);
     setUserInput("");
   }, []);
+
+  const startNewChat = useCallback(() => {
+    const fresh = createChatSession();
+    setChatSessions((prev) => [fresh, ...prev]);
+    setActiveChatId(fresh.id);
+    setSelectedModels(fresh.selectedModels);
+    setModelChats(fresh.modelChats);
+    setModelRoles(fresh.modelRoles);
+    setUserInput("");
+    setAttachments([]);
+    setIsInterModelSelected(false);
+    setIsInterModelChatActive(false);
+  }, []);
+
+  const switchToChat = useCallback(
+    (chatId: string) => {
+      const target = chatSessions.find((session) => session.id === chatId);
+      if (!target) return;
+      setActiveChatId(target.id);
+      setSelectedModels(target.selectedModels || []);
+      setModelChats(target.modelChats || {});
+      setModelRoles(target.modelRoles || {});
+      setUserInput("");
+      setAttachments([]);
+      setIsInterModelSelected(false);
+      setIsInterModelChatActive(false);
+      setIsChatHistoryOpen(false);
+    },
+    [chatSessions],
+  );
 
   const installPwa = useCallback(async () => {
     if (!installPromptEvent) return;
@@ -794,6 +990,14 @@ export default function Home() {
     setInstallPromptEvent(null);
     setCanInstallPwa(false);
   }, [installPromptEvent]);
+
+  const updatePwa = useCallback(async () => {
+    if (!waitingServiceWorker) return;
+    setIsUpdatingPwa(true);
+    waitingServiceWorker.postMessage({ type: "SKIP_WAITING" });
+    setCanUpdatePwa(false);
+    setWaitingServiceWorker(null);
+  }, [waitingServiceWorker]);
 
   const copyInstallCommand = useCallback(async () => {
     try {
@@ -859,6 +1063,28 @@ export default function Home() {
       });
       return next;
     });
+    setChatSessions((prev) =>
+      prev.map((session) => {
+        const nextSelected = session.selectedModels.filter(
+          (modelKey) => getHostIdFromModelKey(modelKey) !== hostId,
+        );
+        const nextChats: Record<string, ModelChatData> = {};
+        Object.keys(session.modelChats || {}).forEach((key) => {
+          if (getHostIdFromModelKey(key) !== hostId) nextChats[key] = session.modelChats[key];
+        });
+        const nextRoles: Record<string, string> = {};
+        Object.keys(session.modelRoles || {}).forEach((key) => {
+          if (getHostIdFromModelKey(key) !== hostId) nextRoles[key] = session.modelRoles[key];
+        });
+        return {
+          ...session,
+          selectedModels: nextSelected,
+          modelChats: nextChats,
+          modelRoles: nextRoles,
+          updatedAt: Date.now(),
+        };
+      }),
+    );
   }, [getHostIdFromModelKey]);
 
   const testHostConnection = useCallback(
@@ -1554,21 +1780,59 @@ export default function Home() {
       modelDisplayNameByKey,
     ],
   );
+
+  const chatSessionItems = useMemo(
+    () =>
+      [...chatSessions]
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .map((session) => {
+          const baseRefs = new Set(
+            session.selectedModels.map((modelKey) => getBaseModelRef(modelKey)),
+          );
+          const hostIds = new Set(
+            session.selectedModels.map((modelKey) => getHostIdFromModelKey(modelKey)),
+          );
+          return {
+            id: session.id,
+            title: session.title || "New chat",
+            updatedAt: session.updatedAt,
+            modelCount: baseRefs.size,
+            hostCount: Array.from(hostIds).filter(Boolean).length,
+          };
+        }),
+    [chatSessions, getBaseModelRef, getHostIdFromModelKey],
+  );
+
   return (
     <div className="flex h-screen flex-col bg-background">
       <div className="border-b border-border bg-background/95 backdrop-blur">
-        <div className="max-w-7xl mx-auto px-6 py-2 flex items-center justify-between">
+        <div className="max-w-7xl mx-auto px-6 py-2 grid grid-cols-[1fr_auto_1fr] items-center">
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setIsChatHistoryOpen(true)}
+              className="h-8 w-8 rounded-full border border-border bg-card hover:bg-muted/50 transition-colors inline-flex items-center justify-center"
+              aria-label="Open chat history"
+            >
+              <PanelRightOpen className="h-4 w-4 text-foreground" />
+            </button>
+          </div>
+          <div className="flex items-center gap-2 justify-self-center">
+              <img
+                src={`${PUBLIC_BASE_PATH}/logo-black.png`}
+                alt="Multi Llama Chat logo"
+                className="h-5 w-5 object-contain dark:hidden"
+              />
               <img
                 src={`${PUBLIC_BASE_PATH}/logo.png`}
                 alt="Multi Llama Chat logo"
-                className="h-5 w-5 object-contain invert dark:invert-0"
+                className="hidden h-5 w-5 object-contain dark:block"
               />
             <h1 className="text-xs font-semibold tracking-wide text-foreground">
               Multi Llama Chat
             </h1>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 justify-self-end">
             <button
               type="button"
               onClick={() =>
@@ -1647,9 +1911,14 @@ export default function Home() {
           <div className="flex-1 flex items-center justify-center">
             <div className="text-center">
               <img
+                src={`${PUBLIC_BASE_PATH}/logo-black.png`}
+                alt="Multi Llama Chat logo"
+                className="h-20 w-20 object-contain mx-auto mb-3 dark:hidden"
+              />
+              <img
                 src={`${PUBLIC_BASE_PATH}/logo.png`}
                 alt="Multi Llama Chat logo"
-                className="h-20 w-20 object-contain mx-auto mb-3 invert dark:invert-0"
+                className="hidden h-20 w-20 object-contain mx-auto mb-3 dark:block"
               />
               <h2 className="text-3xl font-bold text-foreground mb-2">
                 Multi Llama Chat
@@ -1945,6 +2214,15 @@ export default function Home() {
         </div>
       </div>
 
+      <ChatHistoryDrawer
+        open={isChatHistoryOpen}
+        onOpenChange={setIsChatHistoryOpen}
+        sessions={chatSessionItems}
+        activeSessionId={activeChatId}
+        onSelectSession={switchToChat}
+        onNewChat={startNewChat}
+      />
+
       <SettingsDrawer
         open={isSettingsOpen}
         onOpenChange={setIsSettingsOpen}
@@ -2015,7 +2293,10 @@ export default function Home() {
         }
         onClearSavedChats={clearPersistedData}
         canInstallPwa={canInstallPwa}
+        canUpdatePwa={canUpdatePwa}
+        isUpdatingPwa={isUpdatingPwa}
         onInstallPwa={installPwa}
+        onUpdatePwa={updatePwa}
       />
 
       <OnboardingDialog
@@ -2042,6 +2323,7 @@ export default function Home() {
         didCopyInstallCommand={didCopyInstallCommand}
         didCopyNetworkCommand={didCopyNetworkCommand}
         ollamaNetworkCommand={ollamaNetworkCommand}
+        ollamaNetworkCommandLabel={ollamaNetworkCommandLabel}
         onCopyInstallCommand={copyInstallCommand}
         onCopyNetworkCommand={copyNetworkCommand}
         onOpenSettings={() => {
