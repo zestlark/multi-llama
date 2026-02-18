@@ -2,7 +2,7 @@
   "name": "Multi Llama Chat",
   "short_name": "Multi Llama",
   "description": "Chat with multiple AI models simultaneously",
-  "start_url": "./?v=0.1.6",
+  "start_url": "./?v=0.1.7",
   "scope": ".",
   "display": "standalone",
   "background_color": "#0b0f14",
