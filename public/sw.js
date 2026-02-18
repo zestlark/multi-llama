@@ -1,5 +1,5 @@
 <<<<<<< Updated upstream
-const CACHE_NAME = "multi-llama-chat-v0.1.2";
+const CACHE_NAME = "multi-llama-chat-v0.1.3";
 =======
 const CACHE_NAME = "multi-llama-chat-v0.1.1-iconfix1";
 >>>>>>> Stashed changes
