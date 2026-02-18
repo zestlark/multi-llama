@@ -279,7 +279,7 @@ export default function SettingsDrawer({
               variant="outline"
               size="sm"
               onClick={onClearSavedChats}
-              className="w-full justify-center"
+              className="w-full justify-center border-border bg-card hover:bg-muted"
             >
               <Trash2 className="h-4 w-4 mr-1" />
               Clear saved chats

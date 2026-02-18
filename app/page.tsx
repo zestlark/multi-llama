@@ -126,6 +126,16 @@ const sessionHasMessages = (session: ChatSession) =>
     (chat.messages || []).some((message) => !!message.content?.trim()),
   );
 
+const MAX_QUEUED_MESSAGES = 5;
+
+interface QueuedMessageItem {
+  id: string;
+  input: string;
+  attachments: Attachment[];
+  selectedModels: string[];
+  isInterModelSelected: boolean;
+}
+
 export default function Home() {
   const { resolvedTheme, setTheme } = useTheme();
   const [isThemeReady, setIsThemeReady] = useState(false);
@@ -174,6 +184,8 @@ export default function Home() {
   const [roleLibrary, setRoleLibrary] = useState<string[]>(BUILT_IN_ROLES);
   const [userInput, setUserInput] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [messageQueue, setMessageQueue] = useState<QueuedMessageItem[]>([]);
+  const [processingQueueId, setProcessingQueueId] = useState<string | null>(null);
   const [isAllLoading, setIsAllLoading] = useState(false);
   const [ollamaError, setOllamaError] = useState("");
   const containerRef = useRef<HTMLDivElement>(null);
@@ -978,6 +990,9 @@ export default function Home() {
     setModelChats(fresh.modelChats);
     setModelRoles(fresh.modelRoles);
     setUserInput("");
+    setMessageQueue([]);
+    setProcessingQueueId(null);
+    setIsAllLoading(false);
   }, []);
 
   const startNewChat = useCallback(() => {
@@ -992,6 +1007,9 @@ export default function Home() {
     setCurrentThinkingModel("");
     setIsChatHistoryOpen(false);
     clearChatIdQuery("push");
+    setMessageQueue([]);
+    setProcessingQueueId(null);
+    setIsAllLoading(false);
     requestAnimationFrame(() => {
       textareaRef.current?.focus();
     });
@@ -1009,6 +1027,9 @@ export default function Home() {
       setAttachments([]);
       setIsInterModelSelected(false);
       setIsInterModelChatActive(false);
+      setMessageQueue([]);
+      setProcessingQueueId(null);
+      setIsAllLoading(false);
       setIsChatHistoryOpen(false);
       setChatIdQuery(target.id, "push");
     },
@@ -1032,6 +1053,9 @@ export default function Home() {
         setIsInterModelSelected(false);
         setIsInterModelChatActive(false);
         setCurrentThinkingModel("");
+        setMessageQueue([]);
+        setProcessingQueueId(null);
+        setIsAllLoading(false);
         setChatIdQuery(nextSession.id, "replace");
         return;
       }
@@ -1045,6 +1069,9 @@ export default function Home() {
       setIsInterModelSelected(false);
       setIsInterModelChatActive(false);
       setCurrentThinkingModel("");
+      setMessageQueue([]);
+      setProcessingQueueId(null);
+      setIsAllLoading(false);
       clearChatIdQuery("replace");
     },
     [activeChatId, chatSessions, clearChatIdQuery, setChatIdQuery],
@@ -1382,214 +1409,248 @@ export default function Home() {
     });
   }, []);
 
-  const sendMessage = useCallback(async () => {
+  const processQueuedMessage = useCallback(
+    async (queueItem: QueuedMessageItem) => {
+      const { input, attachments: queuedAttachments, selectedModels: queuedModels } =
+        queueItem;
+      if ((!input.trim() && queuedAttachments.length === 0) || queuedModels.length === 0)
+        return;
+
+      let sessionIdForMessage = activeChatId;
+      if (!sessionIdForMessage) {
+        const fresh = createChatSession({
+          selectedModels: queuedModels,
+          modelChats,
+          modelRoles,
+        });
+        sessionIdForMessage = fresh.id;
+        setChatSessions((prev) => [fresh, ...prev]);
+        setActiveChatId(fresh.id);
+      }
+
+      if (typeof window !== "undefined") {
+        const params = new URLSearchParams(window.location.search);
+        if (!params.get("chatid")) {
+          setChatIdQuery(sessionIdForMessage, "push");
+        }
+      }
+
+      const taggedModels = parseTaggedModels(input, queuedModels);
+      const targetModels = taggedModels.length > 0 ? taggedModels : [...queuedModels];
+      const messageContent = stripModelTags(input);
+      const textAttachments = queuedAttachments.filter((item) => item.kind === "text");
+      const imageAttachments = queuedAttachments.filter((item) => item.kind === "image");
+      const textAttachmentBlock =
+        textAttachments.length > 0
+          ? `\n\nAttached text files:\n${textAttachments
+              .map(
+                (item) =>
+                  `\n[${item.name}]\n${item.textContent || "(empty file)"}`,
+              )
+              .join("\n")}`
+          : "";
+      const imageContextBlock =
+        imageAttachments.length > 0
+          ? `\n\nAttached images: ${imageAttachments.map((item) => item.name).join(", ")}`
+          : "";
+      const mergedUserPrompt = `${messageContent}${textAttachmentBlock}${imageContextBlock}`.trim();
+      if (!mergedUserPrompt && imageAttachments.length === 0) return;
+      const userMessageForUi =
+        messageContent ||
+        [
+          textAttachments.length > 0
+            ? `${textAttachments.length} text file${textAttachments.length > 1 ? "s" : ""}`
+            : "",
+          imageAttachments.length > 0
+            ? `${imageAttachments.length} image${imageAttachments.length > 1 ? "s" : ""}`
+            : "",
+        ]
+          .filter(Boolean)
+          .join(" + ");
+      const imagePayload = imageAttachments
+        .map((item) => item.base64Content || "")
+        .filter(Boolean);
+
+      setIsAllLoading(true);
+      try {
+        if (queueItem.isInterModelSelected) {
+          const firstModel = targetModels[0];
+          setModelChats((prev) => {
+            const updated = { ...prev };
+            const current = updated[firstModel] || {
+              modelName: firstModel,
+              messages: [],
+              isLoading: false,
+            };
+            updated[firstModel] = {
+              ...current,
+              messages: [...current.messages, { role: "user", content: userMessageForUi }],
+              isLoading: true,
+            };
+            return updated;
+          });
+          if (startInterModelChatRef.current) {
+            await startInterModelChatRef.current(mergedUserPrompt, targetModels);
+          }
+          return;
+        }
+
+        const previousModelChats = modelChats;
+
+        // Add user message to all model chats (UI state)
+        setModelChats((prev) => {
+          const updated = { ...prev };
+          targetModels.forEach((model) => {
+            updated[model] = {
+              ...updated[model],
+              messages: [...updated[model].messages, { role: "user", content: userMessageForUi }],
+              isLoading: true,
+            };
+          });
+          return updated;
+        });
+
+        // Send message to all models in parallel
+        const promises = targetModels.map(async (model) => {
+          try {
+            const hostUrl = getHostUrlById(getHostIdFromModelKey(model));
+            if (!hostUrl) throw new Error("Host URL not found for selected model.");
+
+            const systemMessage = buildSystemMessageForModel(model);
+            const priorMessages = previousModelChats[model]?.messages || [];
+            const ollamaMessages: OllamaChatMessage[] = [
+              ...(systemMessage ? [systemMessage] : []),
+              ...convertUiMessagesToOllama(priorMessages),
+              {
+                role: "user",
+                content: buildPromptForModel(model, mergedUserPrompt),
+                ...(imagePayload.length > 0 ? { images: imagePayload } : {}),
+              },
+            ];
+
+            const rawAi = await generateWithOllama(
+              hostUrl,
+              getBaseModelName(model),
+              ollamaMessages,
+            );
+            const ai = applyOutputLengthLimit(
+              rawAi,
+              normalizeChatConfiguration({
+                enabled: settings.chatConfigEnabled,
+                prePrompt: settings.chatConfigPrePrompt,
+                postPrompt: settings.chatConfigPostPrompt,
+                maxOutputLength: settings.chatConfigMaxOutputLength,
+              }),
+            );
+
+            setModelChats((prev) => ({
+              ...prev,
+              [model]: {
+                ...prev[model],
+                messages: [...prev[model].messages, { role: "assistant", content: ai }],
+                isLoading: false,
+              },
+            }));
+          } catch (error) {
+            console.error(`[v0] Error with model ${model}:`, error);
+            const hostId = getHostIdFromModelKey(model);
+            if (hostId) {
+              setHostStatuses((prev) => ({ ...prev, [hostId]: "failed" }));
+            }
+            const detail = error instanceof Error ? error.message : "Unknown error";
+            setModelChats((prev) => ({
+              ...prev,
+              [model]: {
+                ...prev[model],
+                messages: [
+                  ...prev[model].messages,
+                  {
+                    role: "assistant",
+                    content: `Error: Could not get response from ${getBaseModelName(model)}. ${detail}`,
+                  },
+                ],
+                isLoading: false,
+              },
+            }));
+          }
+        });
+
+        await Promise.all(promises);
+      } finally {
+        setIsAllLoading(false);
+      }
+    },
+    [
+      activeChatId,
+      buildPromptForModel,
+      buildSystemMessageForModel,
+      convertUiMessagesToOllama,
+      createChatSession,
+      generateWithOllama,
+      getBaseModelName,
+      getHostIdFromModelKey,
+      getHostUrlById,
+      modelChats,
+      modelRoles,
+      parseTaggedModels,
+      setChatIdQuery,
+      settings.chatConfigEnabled,
+      settings.chatConfigMaxOutputLength,
+      settings.chatConfigPostPrompt,
+      settings.chatConfigPrePrompt,
+      stripModelTags,
+    ],
+  );
+
+  const queuePreview = useCallback((item: QueuedMessageItem) => {
+    const text = stripModelTags(item.input).trim();
+    if (text) return text;
+    const fileCount = item.attachments.length;
+    return fileCount > 0
+      ? `${fileCount} attachment${fileCount === 1 ? "" : "s"}`
+      : "Message";
+  }, [stripModelTags]);
+
+  const sendMessage = useCallback(() => {
     if ((!userInput.trim() && attachments.length === 0) || selectedModels.length === 0)
       return;
-
-    let sessionIdForMessage = activeChatId;
-    if (!sessionIdForMessage) {
-      const fresh = createChatSession({
-        selectedModels,
-        modelChats,
-        modelRoles,
-      });
-      sessionIdForMessage = fresh.id;
-      setChatSessions((prev) => [fresh, ...prev]);
-      setActiveChatId(fresh.id);
+    if (messageQueue.length >= MAX_QUEUED_MESSAGES) {
+      toast.error(`Queue limit reached (${MAX_QUEUED_MESSAGES}).`);
+      return;
     }
 
-    if (typeof window !== "undefined") {
-      const params = new URLSearchParams(window.location.search);
-      if (!params.get("chatid")) {
-        setChatIdQuery(sessionIdForMessage, "push");
-      }
-    }
-
-    const taggedModels = parseTaggedModels(userInput, selectedModels);
-    const targetModels =
-      taggedModels.length > 0 ? taggedModels : [...selectedModels];
-    const messageContent = stripModelTags(userInput);
-    const textAttachments = attachments.filter((item) => item.kind === "text");
-    const imageAttachments = attachments.filter((item) => item.kind === "image");
-    const textAttachmentBlock =
-      textAttachments.length > 0
-        ? `\n\nAttached text files:\n${textAttachments
-            .map(
-              (item) =>
-                `\n[${item.name}]\n${item.textContent || "(empty file)"}`,
-            )
-            .join("\n")}`
-        : "";
-    const imageContextBlock =
-      imageAttachments.length > 0
-        ? `\n\nAttached images: ${imageAttachments.map((item) => item.name).join(", ")}`
-        : "";
-    const mergedUserPrompt = `${messageContent}${textAttachmentBlock}${imageContextBlock}`.trim();
-    if (!mergedUserPrompt && imageAttachments.length === 0) return;
-    const userMessageForUi =
-      messageContent ||
-      [
-        textAttachments.length > 0
-          ? `${textAttachments.length} text file${textAttachments.length > 1 ? "s" : ""}`
-          : "",
-        imageAttachments.length > 0
-          ? `${imageAttachments.length} image${imageAttachments.length > 1 ? "s" : ""}`
-          : "",
-      ]
-        .filter(Boolean)
-        .join(" + ");
-    const imagePayload = imageAttachments
-      .map((item) => item.base64Content || "")
-      .filter(Boolean);
-
+    const queueItem: QueuedMessageItem = {
+      id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      input: userInput,
+      attachments: attachments.map((item) => ({ ...item })),
+      selectedModels: [...selectedModels],
+      isInterModelSelected,
+    };
+    setMessageQueue((prev) => [...prev, queueItem]);
     setUserInput("");
     setAttachments([]);
     setActiveMentionStart(null);
     setActiveMentionEnd(null);
     setActiveMentionQuery("");
-    setIsAllLoading(true);
+    setIsInterModelSelected(false);
+  }, [userInput, attachments, selectedModels, isInterModelSelected, messageQueue.length]);
 
-    if (isInterModelSelected) {
-      const firstModel = targetModels[0];
-      setModelChats((prev) => {
-        const updated = { ...prev };
-        const current = updated[firstModel] || {
-          modelName: firstModel,
-          messages: [],
-          isLoading: false,
-        };
-        updated[firstModel] = {
-          ...current,
-          messages: [
-            ...current.messages,
-            { role: "user", content: userMessageForUi },
-          ],
-          isLoading: true,
-        };
-        return updated;
-      });
-      setIsInterModelSelected(false);
-      if (startInterModelChatRef.current) {
-        await startInterModelChatRef.current(mergedUserPrompt, targetModels);
-      }
-      setIsAllLoading(false);
-      return;
-    }
+  const removeQueuedMessage = useCallback((id: string) => {
+    if (processingQueueId === id) return;
+    setMessageQueue((prev) => prev.filter((item) => item.id !== id));
+  }, [processingQueueId]);
 
-    const previousModelChats = modelChats;
-
-    // Add user message to all model chats (UI state)
-    setModelChats((prev) => {
-      const updated = { ...prev };
-      targetModels.forEach((model) => {
-        updated[model] = {
-          ...updated[model],
-          messages: [
-            ...updated[model].messages,
-            { role: "user", content: userMessageForUi },
-          ],
-          isLoading: true,
-        };
-      });
-      return updated;
+  useEffect(() => {
+    if (processingQueueId || messageQueue.length === 0 || isInterModelChatActive) return;
+    const next = messageQueue[0];
+    setProcessingQueueId(next.id);
+    void processQueuedMessage(next).finally(() => {
+      setMessageQueue((prev) => prev.filter((item) => item.id !== next.id));
+      setProcessingQueueId((current) => (current === next.id ? null : current));
     });
+  }, [isInterModelChatActive, messageQueue, processQueuedMessage, processingQueueId]);
 
-    // Send message to all models in parallel
-    const promises = targetModels.map(async (model) => {
-      try {
-        const hostUrl = getHostUrlById(getHostIdFromModelKey(model));
-        if (!hostUrl) throw new Error("Host URL not found for selected model.");
-
-        const systemMessage = buildSystemMessageForModel(model);
-        const priorMessages = previousModelChats[model]?.messages || [];
-        const ollamaMessages: OllamaChatMessage[] = [
-          ...(systemMessage ? [systemMessage] : []),
-          ...convertUiMessagesToOllama(priorMessages),
-          {
-            role: "user",
-            content: buildPromptForModel(model, mergedUserPrompt),
-            ...(imagePayload.length > 0 ? { images: imagePayload } : {}),
-          },
-        ];
-
-        const rawAi = await generateWithOllama(
-          hostUrl,
-          getBaseModelName(model),
-          ollamaMessages,
-        );
-        const ai = applyOutputLengthLimit(
-          rawAi,
-          normalizeChatConfiguration({
-            enabled: settings.chatConfigEnabled,
-            prePrompt: settings.chatConfigPrePrompt,
-            postPrompt: settings.chatConfigPostPrompt,
-            maxOutputLength: settings.chatConfigMaxOutputLength,
-          }),
-        );
-
-        // Add assistant response
-        setModelChats((prev) => ({
-          ...prev,
-          [model]: {
-            ...prev[model],
-            messages: [
-              ...prev[model].messages,
-              { role: "assistant", content: ai },
-            ],
-            isLoading: false,
-          },
-        }));
-      } catch (error) {
-        console.error(`[v0] Error with model ${model}:`, error);
-        const hostId = getHostIdFromModelKey(model);
-        if (hostId) {
-          setHostStatuses((prev) => ({ ...prev, [hostId]: "failed" }));
-        }
-        const detail =
-          error instanceof Error ? error.message : "Unknown error";
-        setModelChats((prev) => ({
-          ...prev,
-          [model]: {
-            ...prev[model],
-            messages: [
-              ...prev[model].messages,
-              {
-                role: "assistant",
-                content: `Error: Could not get response from ${getBaseModelName(model)}. ${detail}`,
-              },
-            ],
-            isLoading: false,
-          },
-        }));
-      }
-    });
-
-    await Promise.all(promises);
-    setIsAllLoading(false);
-  }, [
-    userInput,
-    attachments,
-    selectedModels,
-    isInterModelSelected,
-    parseTaggedModels,
-    stripModelTags,
-    generateWithOllama,
-    getHostIdFromModelKey,
-    getHostUrlById,
-    getBaseModelName,
-    buildPromptForModel,
-    modelChats,
-    buildSystemMessageForModel,
-    convertUiMessagesToOllama,
-    activeChatId,
-    createChatSession,
-    setChatIdQuery,
-    modelRoles,
-    settings.chatConfigEnabled,
-    settings.chatConfigPrePrompt,
-    settings.chatConfigPostPrompt,
-    settings.chatConfigMaxOutputLength,
-  ]);
+  const isQueueFull = messageQueue.length >= MAX_QUEUED_MESSAGES;
 
   const mentionSuggestions = useMemo(() => {
     const query = activeMentionQuery.toLowerCase();
@@ -1616,7 +1677,6 @@ export default function Home() {
     activeMentionStart !== null &&
     activeMentionEnd !== null &&
     mentionSuggestions.length > 0 &&
-    !isAllLoading &&
     !isInterModelChatActive;
 
   useEffect(() => {
@@ -1679,8 +1739,8 @@ export default function Home() {
     if (
       e.key === "Enter" &&
       !e.shiftKey &&
-      !isAllLoading &&
       !isInterModelChatActive &&
+      !isQueueFull &&
       selectedModels.length > 0 &&
       (userInput.trim().length > 0 || attachments.length > 0)
     ) {
@@ -2377,6 +2437,42 @@ export default function Home() {
                   Image attachments may require a vision-capable Ollama model.
                 </p>
               )}
+              {messageQueue.length > 0 && (
+                <div className="flex items-center gap-1.5 overflow-x-auto slim-scrollbar pb-0.5">
+                  {messageQueue.map((item) => {
+                    const isProcessing = item.id === processingQueueId;
+                    return (
+                      <span
+                        key={item.id}
+                        className={`inline-flex max-w-[220px] items-center gap-1 rounded-full border px-2 py-1 text-[11px] ${
+                          isProcessing
+                            ? "border-primary/40 bg-primary/10 text-primary"
+                            : "border-border bg-card text-foreground"
+                        }`}
+                      >
+                        {isProcessing ? (
+                          <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+                        ) : null}
+                        <span className="truncate" title={queuePreview(item)}>
+                          {queuePreview(item)}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => removeQueuedMessage(item.id)}
+                          disabled={isProcessing}
+                          className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"
+                          aria-label="Remove queued message"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </span>
+                    );
+                  })}
+                  <span className="text-[10px] text-muted-foreground whitespace-nowrap">
+                    Queue {messageQueue.length}/{MAX_QUEUED_MESSAGES}
+                  </span>
+                </div>
+              )}
               <div className="flex gap-1.5 items-center relative">
                 {/* Inter-model button always visible if input area is visible (1+ models) */}
                 <TooltipProvider>
@@ -2450,7 +2546,7 @@ export default function Home() {
                 <button
                   type="button"
                   onClick={() => attachmentInputRef.current?.click()}
-                  disabled={isAllLoading || isInterModelChatActive}
+                  disabled={isInterModelChatActive}
                   className="h-9 w-9 rounded-full border border-border bg-card hover:bg-muted/50 transition-colors inline-flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
                   aria-label="Add attachment"
                 >
@@ -2522,19 +2618,15 @@ export default function Home() {
               <Button
                 onClick={sendMessage}
                 disabled={
-                  isAllLoading ||
                   isInterModelChatActive ||
+                  isQueueFull ||
                   selectedModels.length === 0 ||
                   (!userInput.trim() && attachments.length === 0)
                 }
                 aria-label="Send message"
                 className="h-9 w-9 rounded-full bg-primary text-primary-foreground shadow-sm hover:scale-[1.02] hover:bg-primary/90 active:scale-[0.98] transition-all shrink-0"
               >
-                {isAllLoading ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Send className="h-4 w-4" />
-                )}
+                <Send className="h-4 w-4" />
               </Button>
             </div>
             </div>
