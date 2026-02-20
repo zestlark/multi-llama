@@ -1,4 +1,4 @@
-const CACHE_NAME = "multi-llama-chat-v0.1.7";
+const CACHE_NAME = "multi-llama-chat-v0.1.8";
 const SCOPE_PATH = new URL(self.registration.scope).pathname.replace(/\/$/, "");
 const scoped = (path) => `${SCOPE_PATH}${path}`;
 const APP_SHELL = [
