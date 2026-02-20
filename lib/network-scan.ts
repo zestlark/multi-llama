@@ -34,6 +34,24 @@ const parseIpv4 = (url: string) => {
   }
 };
 
+const parseIpv4Raw = (raw: string) => {
+  const trimmed = raw.trim();
+  const match = trimmed.match(/\b(\d{1,3}(?:\.\d{1,3}){3})\b/);
+  if (!match) return null;
+  const parts = match[1].split(".").map((part) => Number.parseInt(part, 10));
+  if (parts.length !== 4) return null;
+  if (parts.some((part) => !Number.isFinite(part) || part < 0 || part > 255)) {
+    return null;
+  }
+  return parts;
+};
+
+export const normalizeScanRangeInput = (raw: string) => {
+  const parsed = parseIpv4Raw(raw);
+  if (!parsed) return "";
+  return `${parsed[0]}.${parsed[1]}.${parsed[2]}`;
+};
+
 export const getLocalIpv4PrefixesFromBrowser = async () => {
   if (typeof window === "undefined") return [] as string[];
   if (typeof RTCPeerConnection === "undefined") return [] as string[];
@@ -97,11 +115,12 @@ export const getLocalIpv4PrefixesFromBrowser = async () => {
 export const buildScanCandidates = (
   hostUrls: string[],
   preferredSubnets: string[] = [],
+  options?: { strictSubnets?: boolean },
 ) => {
-  const candidates = new Set<string>([
-    "http://127.0.0.1:11434",
-    "http://localhost:11434",
-  ]);
+  const strictSubnets = !!options?.strictSubnets;
+  const candidates = new Set<string>(
+    strictSubnets ? [] : ["http://127.0.0.1:11434", "http://localhost:11434"],
+  );
   const subnets = new Set<string>(preferredSubnets.filter(Boolean));
   if (subnets.size === 0) {
     subnets.add("10.0.0");
@@ -110,6 +129,7 @@ export const buildScanCandidates = (
   }
 
   hostUrls.forEach((hostUrl) => {
+    if (strictSubnets) return;
     const normalized = normalizeOllamaBaseUrl(hostUrl);
     if (!normalized) return;
     candidates.add(normalized);
@@ -133,8 +153,22 @@ export interface ScannedHostSummary {
 }
 
 export const scanNetworkForOllamaHosts = async (hostUrls: string[]) => {
-  const detectedSubnets = await getLocalIpv4PrefixesFromBrowser();
-  const candidates = buildScanCandidates(hostUrls, detectedSubnets);
+  return scanNetworkForOllamaHostsWithOptions(hostUrls);
+};
+
+export const scanNetworkForOllamaHostsWithOptions = async (
+  hostUrls: string[],
+  options?: { customRangeInput?: string },
+) => {
+  const customPrefix = options?.customRangeInput
+    ? normalizeScanRangeInput(options.customRangeInput)
+    : "";
+  const detectedSubnets = customPrefix
+    ? [customPrefix]
+    : await getLocalIpv4PrefixesFromBrowser();
+  const candidates = buildScanCandidates(hostUrls, detectedSubnets, {
+    strictSubnets: !!customPrefix,
+  });
   const found: ScannedHostSummary[] = [];
   const concurrency = 24;
   let cursor = 0;

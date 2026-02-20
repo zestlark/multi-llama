@@ -5,7 +5,10 @@ import type {
   HostConnectionStatus,
   UserSettings,
 } from "@/lib/app-types";
-import { normalizeOllamaBaseUrl, scanNetworkForOllamaHosts } from "@/lib/network-scan";
+import {
+  normalizeOllamaBaseUrl,
+  scanNetworkForOllamaHostsWithOptions,
+} from "@/lib/network-scan";
 
 interface HostRef {
   id: string;
@@ -39,15 +42,16 @@ export const useNetworkScan = ({
   const [scanErrorMessage, setScanErrorMessage] = useState("");
   const [addedScannedHostUrls, setAddedScannedHostUrls] = useState<string[]>([]);
 
-  const startNetworkScan = useCallback(async () => {
+  const startNetworkScan = useCallback(async (customRangeInput?: string) => {
     if (isNetworkScanning) return;
     setIsNetworkScanning(true);
     setScanErrorMessage("");
     setScannedHosts([]);
     setAddedScannedHostUrls([]);
 
-    const scanned = await scanNetworkForOllamaHosts(
+    const scanned = await scanNetworkForOllamaHostsWithOptions(
       normalizedHosts.map((host) => host.url),
+      { customRangeInput },
     );
     setScannedHosts(scanned as ScannedHostItem[]);
     if (scanned.length === 0) {

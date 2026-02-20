@@ -22,7 +22,7 @@ interface NetworkScanDialogProps {
   items: ScannedHostItem[];
   configuredHostUrls: string[];
   addedHostUrls: string[];
-  onScan: () => void;
+  onScan: (customRangeInput?: string) => void;
   onAddHost: (url: string) => void;
 }
 
@@ -43,6 +43,13 @@ export default function NetworkScanDialog({
     "Use OLLAMA_HOST=0.0.0.0:11434 to allow LAN access.",
   ];
   const [tipIndex, setTipIndex] = React.useState(0);
+  const [customRangeSegments, setCustomRangeSegments] = React.useState([
+    "",
+    "",
+    "",
+    "",
+  ]);
+  const segmentInputRefs = React.useRef<Array<HTMLInputElement | null>>([]);
   const isNotFound = !isScanning && !!scanError && items.length === 0;
   const hasScanned = items.length > 0 || !!scanError;
   const canTriggerScan = !isScanning;
@@ -56,10 +63,38 @@ export default function NetworkScanDialog({
 
   const configuredSet = new Set(configuredHostUrls);
   const addedSet = new Set(addedHostUrls);
+  const customRangeInput = React.useMemo(() => {
+    if (customRangeSegments.some((segment) => segment.trim() === "")) return "";
+    return customRangeSegments.join(".");
+  }, [customRangeSegments]);
+
+  const updateSegment = (index: number, value: string) => {
+    const digitsOnly = value.replace(/[^\d]/g, "").slice(0, 3);
+    setCustomRangeSegments((prev) => {
+      const next = [...prev];
+      next[index] = digitsOnly;
+      return next;
+    });
+  };
+
+  const handleSegmentKeyDown = (
+    event: React.KeyboardEvent<HTMLInputElement>,
+    index: number,
+  ) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    if (index < 3) {
+      segmentInputRefs.current[index + 1]?.focus();
+      return;
+    }
+    if (!isScanning) {
+      onScan(customRangeInput.trim());
+    }
+  };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md p-0 overflow-hidden">
+      <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto slim-scrollbar p-0">
         <DialogHeader className="px-6 pt-6">
           <DialogTitle>Network Scan</DialogTitle>
           <DialogDescription>
@@ -72,7 +107,7 @@ export default function NetworkScanDialog({
             <button
               type="button"
               onClick={() => {
-                if (canTriggerScan) onScan();
+                if (canTriggerScan) onScan(customRangeInput.trim());
               }}
               disabled={!canTriggerScan}
               aria-label={
@@ -140,11 +175,43 @@ export default function NetworkScanDialog({
                 variant="outline"
                 size="sm"
                 className="mt-4"
-                onClick={onScan}
+                onClick={() => onScan(customRangeInput.trim())}
               >
                 {isNotFound ? "Rescan Network" : "Scan Network"}
               </Button>
             ) : null}
+          </div>
+
+          <div className="space-y-2 rounded-md border border-border/60 bg-background/50 px-3 py-3">
+            <label htmlFor="custom-scan-range" className="text-xs text-foreground">
+              Add IP range (optional)
+            </label>
+            <div id="custom-scan-range" className="flex items-center gap-1">
+              {[0, 1, 2, 3].map((index) => (
+                <React.Fragment key={index}>
+                  <input
+                    ref={(el) => {
+                      segmentInputRefs.current[index] = el;
+                    }}
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    value={customRangeSegments[index]}
+                    onChange={(e) => updateSegment(index, e.target.value)}
+                    onKeyDown={(e) => handleSegmentKeyDown(e, index)}
+                    disabled={isScanning}
+                    className="h-8 w-14 rounded-md border border-input bg-background px-2 text-center text-xs disabled:opacity-60 disabled:cursor-not-allowed"
+                    aria-label={`IP segment ${index + 1}`}
+                    placeholder="0"
+                  />
+                  {index < 3 ? (
+                    <span className="text-xs text-muted-foreground">.</span>
+                  ) : null}
+                </React.Fragment>
+              ))}
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              If provided, scan runs only on this subnet (last digit changes 1-254).
+            </p>
           </div>
 
           <div className="rounded-md border border-border/60 bg-background/50 px-3 py-2 text-center">
