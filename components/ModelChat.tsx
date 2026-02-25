@@ -33,6 +33,7 @@ interface ModelChatProps {
   disableDuplicate?: boolean;
   onRemove: () => void;
   disableRemove?: boolean;
+  enableMessageStreaming?: boolean;
 }
 
 export default function ModelChat({
@@ -46,10 +47,12 @@ export default function ModelChat({
   disableDuplicate,
   onRemove,
   disableRemove,
+  enableMessageStreaming = false,
 }: ModelChatProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [isRoleDialogOpen, setIsRoleDialogOpen] = useState(false);
   const [roleDraft, setRoleDraft] = useState(role);
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
 
   useEffect(() => {
     setRoleDraft(role);
@@ -78,35 +81,146 @@ export default function ModelChat({
           className="mt-2 mb-1 max-w-full overflow-x-auto rounded-md bg-muted p-3 text-xs text-foreground"
           data-lang={lang || undefined}
         >
-          <code className="font-mono whitespace-pre">{code}</code>
+          <code className="font-mono whitespace-pre">{renderHighlightedCode(code, lang)}</code>
         </pre>
         <button
           onClick={onCopy}
           className="absolute top-2 right-2 inline-flex items-center gap-1 rounded-md border border-border bg-card/70 px-2 py-1 text-xs text-foreground hover:bg-card transition-colors"
           aria-label="Copy code"
+          title={copied ? "Copied" : "Copy code"}
         >
           {copied ? (
-            <>
-              <Check className="w-3.5 h-3.5 text-primary" />
-              Copied
-            </>
+            <Check className="w-3.5 h-3.5 text-primary" />
           ) : (
-            <>
-              <Copy className="w-3.5 h-3.5" />
-              Copy
-            </>
+            <Copy className="w-3.5 h-3.5" />
           )}
         </button>
       </div>
     );
   }
 
+  const renderHighlightedCode = (code: string, lang?: string) => {
+    type TokenType = "plain" | "comment" | "string" | "keyword" | "number" | "tag" | "attr";
+    interface MatchToken {
+      start: number;
+      end: number;
+      type: Exclude<TokenType, "plain">;
+    }
+
+    const language = (lang || "").toLowerCase();
+    const keywords =
+      language === "css"
+        ? [
+            "display",
+            "position",
+            "color",
+            "background",
+            "border",
+            "padding",
+            "margin",
+            "width",
+            "height",
+            "font-size",
+          ]
+        : [
+            "const",
+            "let",
+            "var",
+            "function",
+            "return",
+            "if",
+            "else",
+            "for",
+            "while",
+            "class",
+            "import",
+            "from",
+            "export",
+            "new",
+            "try",
+            "catch",
+            "throw",
+            "async",
+            "await",
+            "interface",
+            "type",
+            "extends",
+            "implements",
+          ];
+
+    const keywordRegex =
+      keywords.length > 0
+        ? new RegExp(`\\b(?:${keywords.map((k) => k.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&")).join("|")})\\b`, "g")
+        : null;
+
+    const patterns: Array<{ regex: RegExp; type: MatchToken["type"] }> = [
+      { regex: /\/\/.*$/gm, type: "comment" },
+      { regex: /\/\*[\s\S]*?\*\//g, type: "comment" },
+      {
+        regex: /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`/g,
+        type: "string",
+      },
+      ...(keywordRegex ? [{ regex: keywordRegex, type: "keyword" as const }] : []),
+      { regex: /\b\d+(?:\.\d+)?\b/g, type: "number" },
+      { regex: /<\/?[A-Za-z][^>]*>/g, type: "tag" },
+      { regex: /\b[A-Za-z-]+(?==)/g, type: "attr" },
+    ];
+
+    const matches: MatchToken[] = [];
+    patterns.forEach(({ regex, type }) => {
+      const re = new RegExp(regex.source, regex.flags.includes("g") ? regex.flags : `${regex.flags}g`);
+      let match = re.exec(code);
+      while (match) {
+        matches.push({
+          start: match.index,
+          end: match.index + match[0].length,
+          type,
+        });
+        match = re.exec(code);
+      }
+    });
+
+    matches.sort((a, b) => (a.start === b.start ? b.end - b.start - (a.end - a.start) : a.start - b.start));
+
+    const merged: Array<{ text: string; type: TokenType }> = [];
+    let cursor = 0;
+    matches.forEach((m) => {
+      if (m.start < cursor) return;
+      if (m.start > cursor) {
+        merged.push({ text: code.slice(cursor, m.start), type: "plain" });
+      }
+      merged.push({ text: code.slice(m.start, m.end), type: m.type });
+      cursor = m.end;
+    });
+    if (cursor < code.length) {
+      merged.push({ text: code.slice(cursor), type: "plain" });
+    }
+
+    const tokenClass: Record<TokenType, string> = {
+      plain: "text-foreground",
+      comment: "text-emerald-500",
+      string: "text-amber-500",
+      keyword: "text-sky-500",
+      number: "text-fuchsia-500",
+      tag: "text-cyan-500",
+      attr: "text-violet-500",
+    };
+
+    return merged.map((token, idx) => (
+      <span key={`tok-${idx}`} className={tokenClass[token.type]}>
+        {token.text}
+      </span>
+    ));
+  };
+
   const renderTextSegment = (text: string) => {
     const segments: ReactNode[] = [];
     let i = 0;
     while (i < text.length) {
-      const start = text.indexOf("`", i);
-      if (start === -1) {
+      const inlineMatch = /(`[^`]+`|\*\*[^*]+\*\*)/g;
+      inlineMatch.lastIndex = i;
+      const match = inlineMatch.exec(text);
+      if (!match) {
         segments.push(
           <span key={`t-${i}`} className="whitespace-pre-wrap">
             {text.slice(i)}
@@ -114,6 +228,7 @@ export default function ModelChat({
         );
         break;
       }
+      const start = match.index;
       if (start > i) {
         segments.push(
           <span key={`t-${i}`} className="whitespace-pre-wrap">
@@ -121,57 +236,204 @@ export default function ModelChat({
           </span>,
         );
       }
-      const end = text.indexOf("`", start + 1);
-      if (end === -1) {
+      const token = match[0];
+      if (token.startsWith("`") && token.endsWith("`")) {
+        const code = token.slice(1, -1);
         segments.push(
-          <span key={`t-${start}`} className="whitespace-pre-wrap">
-            {text.slice(start)}
-          </span>,
+          <code
+            key={`c-${start}`}
+            className="font-mono bg-muted text-foreground/90 px-1 py-0.5 rounded whitespace-pre-wrap"
+          >
+            {code}
+          </code>,
         );
-        break;
+      } else if (token.startsWith("**") && token.endsWith("**")) {
+        const strongText = token.slice(2, -2);
+        segments.push(
+          <strong key={`b-${start}`} className="font-semibold">
+            {strongText}
+          </strong>,
+        );
       }
-      const code = text.slice(start + 1, end);
-      segments.push(
-        <code
-          key={`c-${start}`}
-          className="font-mono bg-muted text-foreground/90 px-1 py-0.5 rounded whitespace-pre-wrap"
-        >
-          {code}
-        </code>,
-      );
-      i = end + 1;
+      i = start + token.length;
     }
     return <>{segments}</>;
   };
 
+  const renderTextSections = (text: string, keyPrefix: string) => {
+    const blocks = text
+      .split(/\n{2,}/)
+      .map((block) => block.trim())
+      .filter(Boolean);
+
+    if (blocks.length === 0) {
+      return <p className="whitespace-pre-wrap">{renderTextSegment(text)}</p>;
+    }
+
+    return (
+      <div className="space-y-2.5">
+        {blocks.map((block, index) => {
+          const blockKey = `${keyPrefix}-${index}`;
+          const blockLines = block.split("\n");
+          const firstHeadingMatch = blockLines[0]?.trim().match(/^(#{1,6})\s+(.+)$/);
+          if (firstHeadingMatch) {
+            const level = Math.min(6, firstHeadingMatch[1].length);
+            const title = firstHeadingMatch[2];
+            const sizeClass =
+              level <= 2 ? "text-sm font-semibold" : "text-xs font-semibold";
+            const rest = blockLines.slice(1).join("\n").trim();
+            return (
+              <div key={blockKey} className="space-y-1.5">
+                <p className={`${sizeClass} text-foreground`}>
+                  {renderTextSegment(title)}
+                </p>
+                {rest ? (
+                  <div className="text-[inherit]">{renderTextSections(rest, `${blockKey}-rest`)}</div>
+                ) : null}
+              </div>
+            );
+          }
+
+          const lines = block.split("\n").map((line) => line.trim()).filter(Boolean);
+          const isBulletList = lines.length > 0 && lines.every((line) => /^[-*]\s+/.test(line));
+          if (isBulletList) {
+            return (
+              <ul key={blockKey} className="list-disc pl-5 space-y-1">
+                {lines.map((line, li) => (
+                  <li key={`${blockKey}-li-${li}`}>{renderTextSegment(line.replace(/^[-*]\s+/, ""))}</li>
+                ))}
+              </ul>
+            );
+          }
+
+          const isOrderedList =
+            lines.length > 0 && lines.every((line) => /^\d+\.\s+/.test(line));
+          if (isOrderedList) {
+            return (
+              <ol key={blockKey} className="list-decimal pl-5 space-y-1">
+                {lines.map((line, li) => (
+                  <li key={`${blockKey}-li-${li}`}>
+                    {renderTextSegment(line.replace(/^\d+\.\s+/, ""))}
+                  </li>
+                ))}
+              </ol>
+            );
+          }
+
+          return (
+            <p key={blockKey} className="whitespace-pre-wrap">
+              {renderTextSegment(block)}
+            </p>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const normalizeNamedCodeSections = (content: string) => {
+    const lines = content.split("\n");
+    const output: string[] = [];
+    const detectHeader = (line: string) =>
+      line.match(
+        /^(html|css|javascript|typescript|js|ts|json|bash|shell|python|sql|xml|yaml)(?:\s*\([^)]+\))?\s*:?$/i,
+      );
+    const mapLang = (label: string) => {
+      const lower = label.toLowerCase();
+      if (lower === "js") return "javascript";
+      if (lower === "ts") return "typescript";
+      if (lower === "shell") return "bash";
+      return lower;
+    };
+    const looksLikeCodeLine = (line: string) => {
+      const trimmed = line.trim();
+      if (!trimmed) return false;
+      return (
+        /^<\/?[a-zA-Z!][^>]*>/.test(trimmed) ||
+        /[{};<>]/.test(trimmed) ||
+        /^\.[\w-]+\s*\{/.test(trimmed) ||
+        /^[\w-]+\s*:\s*.+;?$/.test(trimmed) ||
+        /^(const|let|var|function|class|if|for|while|return|import|export)\b/.test(
+          trimmed,
+        )
+      );
+    };
+
+    let i = 0;
+    while (i < lines.length) {
+      const headerMatch = detectHeader(lines[i].trim());
+      if (!headerMatch) {
+        output.push(lines[i]);
+        i += 1;
+        continue;
+      }
+
+      let start = i + 1;
+      while (start < lines.length && lines[start].trim() === "") start += 1;
+      if (start >= lines.length || !looksLikeCodeLine(lines[start])) {
+        output.push(lines[i]);
+        i += 1;
+        continue;
+      }
+
+      const sectionTitle = lines[i].trim();
+      const lang = mapLang(headerMatch[1]);
+      let end = start;
+      while (end < lines.length) {
+        const current = lines[end].trim();
+        const isNextSection = !!detectHeader(current);
+        const isNarrativeHeading =
+          /^#{1,6}\s+/.test(current) || /^explanation\b/i.test(current);
+        if ((isNextSection || isNarrativeHeading) && end > start) break;
+        end += 1;
+      }
+
+      const blockLines = lines.slice(start, end);
+      while (blockLines.length > 0 && blockLines[blockLines.length - 1].trim() === "") {
+        blockLines.pop();
+      }
+
+      output.push(`**${sectionTitle}**`);
+      output.push(`\`\`\`${lang}`);
+      output.push(blockLines.join("\n"));
+      output.push("```");
+      i = end;
+    }
+
+    return output.join("\n");
+  };
+
   const renderMessageContent = (content: string) => {
+    const normalizedContent = normalizeNamedCodeSections(content);
     const parts: ReactNode[] = [];
     let i = 0;
-    while (i < content.length) {
-      const fenceStart = content.indexOf("```", i);
+    while (i < normalizedContent.length) {
+      const fenceStart = normalizedContent.indexOf("```", i);
       if (fenceStart === -1) {
         parts.push(
-          <div key={`p-${i}`}>{renderTextSegment(content.slice(i))}</div>,
+          <div key={`p-${i}`}>{renderTextSections(normalizedContent.slice(i), `s-${i}`)}</div>,
         );
         break;
       }
       if (fenceStart > i) {
         parts.push(
-          <div key={`p-${i}`}>
-            {renderTextSegment(content.slice(i, fenceStart))}
+          <div key={`p-${i}`} className="mb-1">
+            {renderTextSections(normalizedContent.slice(i, fenceStart), `s-${i}`)}
           </div>,
         );
       }
-      const fenceEnd = content.indexOf("```", fenceStart + 3);
+      const fenceEnd = normalizedContent.indexOf("```", fenceStart + 3);
       if (fenceEnd === -1) {
         parts.push(
           <div key={`p-${fenceStart}`}>
-            {renderTextSegment(content.slice(fenceStart))}
+            {renderTextSections(
+              normalizedContent.slice(fenceStart),
+              `s-${fenceStart}`,
+            )}
           </div>,
         );
         break;
       }
-      let block = content.slice(fenceStart + 3, fenceEnd);
+      let block = normalizedContent.slice(fenceStart + 3, fenceEnd);
       let lang = "";
       const nl = block.indexOf("\n");
       if (nl !== -1) {
@@ -184,6 +446,16 @@ export default function ModelChat({
       i = fenceEnd + 3;
     }
     return <>{parts}</>;
+  };
+
+  const onCopyMessage = async (id: string, content: string) => {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopiedMessageId(id);
+      setTimeout(() => {
+        setCopiedMessageId((prev) => (prev === id ? null : prev));
+      }, 1500);
+    } catch {}
   };
 
   const getRoleChipClass = (value: string) => {
@@ -204,6 +476,17 @@ export default function ModelChat({
   const filteredRoles = roleOptions.filter((option) =>
     option.toLowerCase().includes(roleDraft.toLowerCase()),
   );
+  const lastMessage = chat.messages[chat.messages.length - 1];
+  const showStreamingTypingBubble =
+    enableMessageStreaming &&
+    chat.isLoading &&
+    lastMessage?.role === "assistant" &&
+    lastMessage.content.trim().length === 0;
+  const showStandaloneStreamingTypingBubble =
+    enableMessageStreaming &&
+    chat.isLoading &&
+    !showStreamingTypingBubble &&
+    !(lastMessage?.role === "assistant" && lastMessage.content.trim().length > 0);
 
   return (
     <Card className="h-full bg-card border border-border rounded-xl shadow-sm hover:shadow-md transition-shadow overflow-hidden flex flex-col">
@@ -231,14 +514,14 @@ export default function ModelChat({
             {chat.messages.length} msg
           </span>
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-3">
           {onDuplicate && (
             <button
               onClick={disableDuplicate ? undefined : onDuplicate}
               className={`text-muted-foreground transition-colors p-0.5 relative ${
                 disableDuplicate
                   ? "opacity-40 cursor-not-allowed"
-                  : "hover:text-foreground"
+                  : "hover:text-primary"
               }`}
               aria-label={`Duplicate ${model}`}
               title="Duplicate chat"
@@ -254,7 +537,7 @@ export default function ModelChat({
             className={`text-muted-foreground transition-colors p-0.5 text-xs ${
               disableRemove
                 ? "opacity-40 cursor-not-allowed"
-                : "hover:text-foreground"
+                : "hover:text-destructive"
             }`}
             aria-label={`Remove ${model}`}
           >
@@ -275,26 +558,78 @@ export default function ModelChat({
           </div>
         ) : (
           <>
-            {chat.messages.map((message, idx) => (
-              <div
-                key={`${idx}-${message.role}`}
-                className={`flex ${
-                  message.role === "user" ? "justify-end" : "justify-start"
-                } animate-in fade-in slide-in-from-bottom-2 duration-300`}
-              >
+            {chat.messages.map((message, idx) => {
+              const messageId = `${idx}-${message.role}`;
+              const isCopied = copiedMessageId === messageId;
+              const isAssistant = message.role === "assistant";
+              const isStreamingPlaceholder =
+                showStreamingTypingBubble && idx === chat.messages.length - 1;
+              return (
                 <div
-                  className={`max-w-xl px-4 py-3 rounded-lg text-sm leading-relaxed break-words ${
-                    message.role === "user"
-                      ? "bg-primary text-primary-foreground rounded-br-none"
-                      : "bg-secondary/50 text-foreground rounded-bl-none border border-border/50"
+                  key={messageId}
+                  className={`group animate-in fade-in slide-in-from-bottom-2 duration-300 ${
+                    message.role === "user" ? "ml-auto" : "mr-auto"
                   }`}
                 >
-                  {renderMessageContent(message.content)}
+                  <div
+                    className={`max-w-xl px-4 py-3 rounded-lg text-sm leading-relaxed break-words ${
+                      message.role === "user"
+                        ? "bg-primary text-primary-foreground rounded-br-none"
+                        : "bg-secondary/50 text-foreground rounded-bl-none border border-border/50"
+                    }`}
+                  >
+                    {isStreamingPlaceholder ? (
+                      <div
+                        className="flex items-center gap-1.5"
+                        aria-label="Assistant is typing"
+                      >
+                        <span className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground/70 [animation-delay:-0.2s]" />
+                        <span className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground/70 [animation-delay:-0.1s]" />
+                        <span className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground/70" />
+                      </div>
+                    ) : (
+                      renderMessageContent(message.content)
+                    )}
+                  </div>
+
+                  {isAssistant && !isStreamingPlaceholder ? (
+                    <div className="mt-1 flex items-center">
+                      <button
+                        type="button"
+                        onClick={() => onCopyMessage(messageId, message.content)}
+                        className={`inline-flex items-center rounded-md px-1.5 py-1 text-[11px] text-muted-foreground hover:text-foreground hover:bg-muted transition-colors ${
+                          isCopied
+                            ? "opacity-100"
+                            : "opacity-100 md:opacity-0 md:group-hover:opacity-100"
+                        }`}
+                        aria-label={`Copy message ${idx + 1}`}
+                        title={isCopied ? "Copied" : "Copy message"}
+                      >
+                        {isCopied ? (
+                          <Check className="h-3.5 w-3.5 text-primary" />
+                        ) : (
+                          <Copy className="h-3.5 w-3.5" />
+                        )}
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+
+            {showStandaloneStreamingTypingBubble && (
+              <div className="flex justify-start animate-in fade-in slide-in-from-bottom-2 duration-300">
+                <div className="bg-secondary/50 text-foreground px-4 py-3 rounded-lg border border-border/50 rounded-bl-none">
+                  <div className="flex items-center gap-1.5" aria-label="Assistant is typing">
+                    <span className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground/70 [animation-delay:-0.2s]" />
+                    <span className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground/70 [animation-delay:-0.1s]" />
+                    <span className="h-2 w-2 animate-bounce rounded-full bg-muted-foreground/70" />
+                  </div>
                 </div>
               </div>
-            ))}
+            )}
 
-            {chat.isLoading && (
+            {chat.isLoading && !enableMessageStreaming && (
               <div className="flex justify-start animate-in fade-in slide-in-from-bottom-2 duration-300">
                 <div className="bg-secondary/50 text-foreground px-4 py-3 rounded-lg border border-border/50 rounded-bl-none flex items-center gap-2">
                   <Loader2 size={16} className="animate-spin text-primary" />

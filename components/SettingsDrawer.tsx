@@ -25,6 +25,7 @@ interface SettingsDrawerProps {
   onPersistDataChange: (checked: boolean) => void;
   onEnableRolesChange: (checked: boolean) => void;
   onAllowSameModelMultiChatChange: (checked: boolean) => void;
+  onEnableMessageStreamingChange: (checked: boolean) => void;
   onChatConfigEnabledChange: (checked: boolean) => void;
   onChatConfigPrePromptChange: (value: string) => void;
   onChatConfigPostPromptChange: (value: string) => void;
@@ -35,6 +36,7 @@ interface SettingsDrawerProps {
   isUpdatingPwa: boolean;
   onInstallPwa: () => void;
   onUpdatePwa: () => void;
+  isInterModelChatActive?: boolean;
 }
 
 export default function SettingsDrawer({
@@ -51,6 +53,7 @@ export default function SettingsDrawer({
   onPersistDataChange,
   onEnableRolesChange,
   onAllowSameModelMultiChatChange,
+  onEnableMessageStreamingChange,
   onChatConfigEnabledChange,
   onChatConfigPrePromptChange,
   onChatConfigPostPromptChange,
@@ -61,6 +64,7 @@ export default function SettingsDrawer({
   isUpdatingPwa,
   onInstallPwa,
   onUpdatePwa,
+  isInterModelChatActive = false,
 }: SettingsDrawerProps) {
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -193,6 +197,23 @@ export default function SettingsDrawer({
                 aria-label="Allow same model multiple instances"
               />
             </div>
+          </div>
+
+          <div className="rounded-md border border-border/70 bg-muted/20 p-3">
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-sm text-foreground">Message streaming</span>
+              <Switch
+                checked={settings.enableMessageStreaming}
+                onCheckedChange={onEnableMessageStreamingChange}
+                aria-label="Enable message streaming"
+                disabled={isInterModelChatActive}
+              />
+            </div>
+            {isInterModelChatActive ? (
+              <p className="mt-2 text-[11px] text-muted-foreground">
+                Stop inter-model chat to change streaming mode.
+              </p>
+            ) : null}
           </div>
 
           <div className="rounded-md border border-border/70 bg-muted/20 p-3 space-y-3">

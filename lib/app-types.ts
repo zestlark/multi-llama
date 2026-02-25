@@ -14,6 +14,7 @@ export interface UserSettings {
   persistDataLocally: boolean;
   enableRoles: boolean;
   allowSameModelMultiChat: boolean;
+  enableMessageStreaming: boolean;
   chatConfigEnabled: boolean;
   chatConfigPrePrompt: string;
   chatConfigPostPrompt: string;

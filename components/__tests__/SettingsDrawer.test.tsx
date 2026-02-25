@@ -7,6 +7,7 @@ const settings = {
   persistDataLocally: true,
   enableRoles: true,
   allowSameModelMultiChat: true,
+  enableMessageStreaming: false,
   chatConfigEnabled: false,
   chatConfigPrePrompt: "",
   chatConfigPostPrompt: "",
@@ -26,6 +27,7 @@ const baseProps = {
   onPersistDataChange: vi.fn(),
   onEnableRolesChange: vi.fn(),
   onAllowSameModelMultiChatChange: vi.fn(),
+  onEnableMessageStreamingChange: vi.fn(),
   onChatConfigEnabledChange: vi.fn(),
   onChatConfigPrePromptChange: vi.fn(),
   onChatConfigPostPromptChange: vi.fn(),
@@ -136,6 +138,7 @@ describe("SettingsDrawer", () => {
     const onPersistDataChange = vi.fn();
     const onEnableRolesChange = vi.fn();
     const onAllowSameModelMultiChatChange = vi.fn();
+    const onEnableMessageStreamingChange = vi.fn();
     const onChatConfigEnabledChange = vi.fn();
     const onChatConfigPrePromptChange = vi.fn();
     const onChatConfigPostPromptChange = vi.fn();
@@ -154,6 +157,7 @@ describe("SettingsDrawer", () => {
         onPersistDataChange={onPersistDataChange}
         onEnableRolesChange={onEnableRolesChange}
         onAllowSameModelMultiChatChange={onAllowSameModelMultiChatChange}
+        onEnableMessageStreamingChange={onEnableMessageStreamingChange}
         onChatConfigEnabledChange={onChatConfigEnabledChange}
         onChatConfigPrePromptChange={onChatConfigPrePromptChange}
         onChatConfigPostPromptChange={onChatConfigPostPromptChange}
@@ -166,6 +170,7 @@ describe("SettingsDrawer", () => {
     await user.click(
       screen.getByRole("switch", { name: "Allow same model multiple instances" }),
     );
+    await user.click(screen.getByRole("switch", { name: "Enable message streaming" }));
     await user.click(screen.getByRole("switch", { name: "Enable chat configuration" }));
 
     await user.type(screen.getByLabelText("Pre prompt (optional)"), "!");
@@ -175,6 +180,7 @@ describe("SettingsDrawer", () => {
     expect(onPersistDataChange).toHaveBeenCalled();
     expect(onEnableRolesChange).toHaveBeenCalled();
     expect(onAllowSameModelMultiChatChange).toHaveBeenCalled();
+    expect(onEnableMessageStreamingChange).toHaveBeenCalled();
     expect(onChatConfigEnabledChange).toHaveBeenCalled();
     expect(onChatConfigPrePromptChange).toHaveBeenCalled();
     expect(onChatConfigPostPromptChange).toHaveBeenCalled();
@@ -225,5 +231,20 @@ describe("SettingsDrawer", () => {
     expect(updateButton.className).toContain("w-full");
     await user.click(updateButton);
     expect(onUpdatePwa).toHaveBeenCalledTimes(1);
+  });
+
+  it("disables message streaming switch while inter-model chat is active", () => {
+    render(
+      <SettingsDrawer
+        {...baseProps}
+        settings={settings}
+        isInterModelChatActive
+      />,
+    );
+
+    expect(screen.getByRole("switch", { name: "Enable message streaming" })).toBeDisabled();
+    expect(
+      screen.getByText("Stop inter-model chat to change streaming mode."),
+    ).toBeInTheDocument();
   });
 });

@@ -104,10 +104,161 @@ describe("ModelChat", () => {
     );
 
     expect(screen.getByText("Thinking...")).toBeInTheDocument();
+    expect(screen.getByText("const").className).toContain("text-sky-500");
     const copyBtn = screen.getByRole("button", { name: "Copy code" });
     await user.click(copyBtn);
     expect(writeText).toHaveBeenCalledWith("const a = 1;\n");
-    expect(screen.getByText("Copied")).toBeInTheDocument();
+  });
+
+  it("shows typing bubbles before first stream chunk and hides thinking row", () => {
+    render(
+      <ModelChat
+        {...baseProps}
+        chat={{
+          modelName: "qwen:4b",
+          messages: [{ role: "assistant", content: "" }],
+          isLoading: true,
+        }}
+        enableMessageStreaming
+      />,
+    );
+
+    expect(screen.getByLabelText("Assistant is typing")).toBeInTheDocument();
+    expect(screen.queryByText("Thinking...")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Copy message 1" })).toBeNull();
+  });
+
+  it("shows standalone typing bubble in streaming mode before placeholder is appended", () => {
+    render(
+      <ModelChat
+        {...baseProps}
+        chat={{
+          modelName: "qwen:4b",
+          messages: [{ role: "user", content: "hello" }],
+          isLoading: true,
+        }}
+        enableMessageStreaming
+      />,
+    );
+
+    expect(screen.getByLabelText("Assistant is typing")).toBeInTheDocument();
+    expect(screen.queryByText("Thinking...")).toBeNull();
+  });
+
+  it("supports copying whole message content", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    mockClipboard(writeText);
+
+    render(
+      <ModelChat
+        {...baseProps}
+        chat={{
+          modelName: "qwen:4b",
+          messages: [{ role: "assistant", content: "full message body" }],
+          isLoading: false,
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Copy message 1" }));
+    expect(writeText).toHaveBeenCalledWith("full message body");
+  });
+
+  it("renders text in section-wise blocks with list structure", () => {
+    render(
+      <ModelChat
+        {...baseProps}
+        chat={{
+          modelName: "qwen:4b",
+          messages: [
+            {
+              role: "assistant",
+              content:
+                "# Plan\n\n- First step\n- Second step\n\n1. One\n2. Two\n\nFinal paragraph.",
+            },
+          ],
+          isLoading: false,
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Plan")).toBeInTheDocument();
+    expect(screen.getByText("First step")).toBeInTheDocument();
+    expect(screen.getByText("Second step")).toBeInTheDocument();
+    expect(screen.getByText("One")).toBeInTheDocument();
+    expect(screen.getByText("Two")).toBeInTheDocument();
+    expect(screen.getByText("Final paragraph.")).toBeInTheDocument();
+  });
+
+  it("renders markdown bold sections without raw ** markers", () => {
+    render(
+      <ModelChat
+        {...baseProps}
+        chat={{
+          modelName: "qwen:4b",
+          messages: [
+            {
+              role: "assistant",
+              content:
+                "Seven Wonders of the World\n\n**The Great Wall of China**\n**Petra in Jordan**",
+            },
+          ],
+          isLoading: false,
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Seven Wonders of the World")).toBeInTheDocument();
+    expect(screen.getByText("The Great Wall of China")).toBeInTheDocument();
+    expect(screen.getByText("Petra in Jordan")).toBeInTheDocument();
+    expect(screen.queryByText(/\*\*/)).toBeNull();
+  });
+
+  it("renders markdown heading without showing ### markers when followed by content", () => {
+    render(
+      <ModelChat
+        {...baseProps}
+        chat={{
+          modelName: "qwen:4b",
+          messages: [
+            {
+              role: "assistant",
+              content: "### Explanation\n- HTML structure\n- CSS styling",
+            },
+          ],
+          isLoading: false,
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Explanation")).toBeInTheDocument();
+    expect(screen.getByText("HTML structure")).toBeInTheDocument();
+    expect(screen.getByText("CSS styling")).toBeInTheDocument();
+    expect(screen.queryByText("### Explanation")).toBeNull();
+  });
+
+  it("auto-detects named HTML/CSS sections and renders as code blocks", () => {
+    render(
+      <ModelChat
+        {...baseProps}
+        chat={{
+          modelName: "qwen:4b",
+          messages: [
+            {
+              role: "assistant",
+              content:
+                "HTML (index.html)\n\n<!DOCTYPE html>\n<html></html>\n\nCSS (styles.css)\n\nbody {\n  color: red;\n}",
+            },
+          ],
+          isLoading: false,
+        }}
+      />,
+    );
+
+    expect(screen.getByText("HTML (index.html)")).toBeInTheDocument();
+    expect(screen.getByText("CSS (styles.css)")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Copy code" }).length).toBe(2);
   });
 
   it("handles malformed markdown and clipboard failures gracefully", async () => {

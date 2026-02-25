@@ -17,6 +17,7 @@ export const DEFAULT_SETTINGS: UserSettings = {
   persistDataLocally: true,
   enableRoles: true,
   allowSameModelMultiChat: true,
+  enableMessageStreaming: false,
   chatConfigEnabled: false,
   chatConfigPrePrompt: "",
   chatConfigPostPrompt: "",

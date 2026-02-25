@@ -126,6 +126,53 @@ const sessionHasMessages = (session: ChatSession) =>
     (chat.messages || []).some((message) => !!message.content?.trim()),
   );
 
+const normalizePersistedModelChats = (
+  modelChats: unknown,
+): Record<string, ModelChatData> => {
+  if (!modelChats || typeof modelChats !== "object") return {};
+  const input = modelChats as Record<string, any>;
+  const out: Record<string, ModelChatData> = {};
+  Object.entries(input).forEach(([modelKey, chat]) => {
+    if (!chat || typeof chat !== "object") return;
+    const rawMessages: unknown[] = Array.isArray(chat.messages) ? chat.messages : [];
+    let messages: Message[] = rawMessages
+      .filter(
+        (
+          msg: unknown,
+        ): msg is { role: "user" | "assistant"; content: string } =>
+          !!msg &&
+          typeof msg === "object" &&
+          "role" in msg &&
+          "content" in msg &&
+          ((msg as { role?: string }).role === "user" ||
+            (msg as { role?: string }).role === "assistant") &&
+          typeof (msg as { content?: unknown }).content === "string",
+      )
+      .map((msg: { role: "user" | "assistant"; content: string }) => ({
+        role: msg.role,
+        content: msg.content,
+      }));
+
+    const wasLoading = !!chat.isLoading;
+    if (wasLoading && messages.length > 0) {
+      const last = messages[messages.length - 1];
+      if (last.role === "assistant" && !last.content.trim()) {
+        messages = messages.slice(0, -1);
+      }
+    }
+
+    out[modelKey] = {
+      modelName:
+        typeof chat.modelName === "string" && chat.modelName.trim()
+          ? chat.modelName
+          : modelKey,
+      messages,
+      isLoading: false,
+    };
+  });
+  return out;
+};
+
 const MAX_QUEUED_MESSAGES = 5;
 
 interface QueuedMessageItem {
@@ -193,6 +240,8 @@ export default function Home() {
   const interChatActiveRef = useRef(false);
   const [isInterModelSelected, setIsInterModelSelected] = useState(false);
   const [currentThinkingModel, setCurrentThinkingModel] = useState<string>("");
+  const [pendingInterruption, setPendingInterruption] = useState("");
+  const pendingInterruptionRef = useRef("");
   const [activeMentionStart, setActiveMentionStart] = useState<number | null>(
     null,
   );
@@ -448,6 +497,7 @@ export default function Home() {
       settings.chatConfigPrePrompt,
       settings.chatConfigPostPrompt,
       settings.chatConfigMaxOutputLength,
+      settings.enableMessageStreaming,
     ],
   );
 
@@ -682,7 +732,9 @@ export default function Home() {
       hostUrl: string,
       model: string,
       messages: OllamaChatMessage[],
+      options?: { stream?: boolean; onChunk?: (accumulated: string) => void },
     ) => {
+      const shouldStream = !!options?.stream;
       const response = await fetch(`${hostUrl}/api/chat`, {
         method: "POST",
         headers: {
@@ -691,9 +743,69 @@ export default function Home() {
         body: JSON.stringify({
           model: model.trim(),
           messages,
-          stream: false,
+          stream: shouldStream,
         }),
       });
+
+      if (shouldStream) {
+        if (!response.ok) {
+          const raw = await response.text();
+          let data: any = {};
+          try {
+            data = raw ? JSON.parse(raw) : {};
+          } catch {
+            data = { error: raw };
+          }
+          const reason = data?.error || data?.message || `HTTP ${response.status}`;
+          throw new Error(`${reason} [${hostUrl}/api/chat]`);
+        }
+
+        const reader = response.body?.getReader();
+        if (!reader) return "";
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let accumulated = "";
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            let parsed: any = null;
+            try {
+              parsed = JSON.parse(trimmed);
+            } catch {
+              continue;
+            }
+            if (parsed?.error) {
+              throw new Error(`${parsed.error} [${hostUrl}/api/chat]`);
+            }
+            const chunk = parsed?.message?.content;
+            if (typeof chunk === "string" && chunk.length > 0) {
+              accumulated += chunk;
+              options?.onChunk?.(accumulated);
+            }
+          }
+        }
+
+        if (buffer.trim()) {
+          try {
+            const parsed = JSON.parse(buffer.trim());
+            const chunk = parsed?.message?.content;
+            if (typeof chunk === "string" && chunk.length > 0) {
+              accumulated += chunk;
+              options?.onChunk?.(accumulated);
+            }
+          } catch {}
+        }
+
+        return accumulated;
+      }
 
       const raw = await response.text();
       let data: any = {};
@@ -764,6 +876,10 @@ export default function Home() {
             typeof parsed.allowSameModelMultiChat === "boolean"
               ? parsed.allowSameModelMultiChat
               : DEFAULT_SETTINGS.allowSameModelMultiChat,
+          enableMessageStreaming:
+            typeof parsed.enableMessageStreaming === "boolean"
+              ? parsed.enableMessageStreaming
+              : DEFAULT_SETTINGS.enableMessageStreaming,
           chatConfigEnabled:
             typeof parsed.chatConfigEnabled === "boolean"
               ? parsed.chatConfigEnabled
@@ -811,7 +927,12 @@ export default function Home() {
                 !!session.modelChats &&
                 typeof session.modelRoles === "object" &&
                 !!session.modelRoles,
-            ).filter((session) => sessionHasMessages(session))
+            )
+              .map((session) => ({
+                ...session,
+                modelChats: normalizePersistedModelChats(session.modelChats),
+              }))
+              .filter((session) => sessionHasMessages(session))
           : [];
 
         if (loadedSessions.length > 0) {
@@ -831,7 +952,7 @@ export default function Home() {
               setChatSessions(loadedSessions);
               setActiveChatId(requestedSession.id);
               setSelectedModels(requestedSession.selectedModels || []);
-              setModelChats(requestedSession.modelChats || {});
+              setModelChats(normalizePersistedModelChats(requestedSession.modelChats));
               setModelRoles(normalizeSessionRoles(requestedSession));
             } else {
               const fresh = createChatSession();
@@ -855,9 +976,7 @@ export default function Home() {
             ? parsed.selectedModels.filter((v): v is string => typeof v === "string")
             : [];
           const loadedChats =
-            parsed.modelChats && typeof parsed.modelChats === "object"
-              ? parsed.modelChats
-              : {};
+            normalizePersistedModelChats(parsed.modelChats);
           const migratedSession = createChatSession({
             selectedModels: loadedSelected,
             modelChats: loadedChats,
@@ -875,7 +994,7 @@ export default function Home() {
             setChatSessions([migratedSession]);
             setActiveChatId(migratedSession.id);
             setSelectedModels(migratedSession.selectedModels);
-            setModelChats(migratedSession.modelChats);
+            setModelChats(normalizePersistedModelChats(migratedSession.modelChats));
             const normalizedMigratedRoles = Object.fromEntries(
               Object.entries(migratedSession.modelRoles || {}).map(([k, v]) => [
                 k,
@@ -957,14 +1076,17 @@ export default function Home() {
       return;
     }
 
-    const persistedSessions = chatSessions.filter((session) =>
-      sessionHasMessages(session),
-    );
+    const persistedSessions = chatSessions
+      .map((session) => ({
+        ...session,
+        modelChats: normalizePersistedModelChats(session.modelChats),
+      }))
+      .filter((session) => sessionHasMessages(session));
     const payload: PersistedChatState = {
       chatSessions: persistedSessions,
       activeChatId,
       selectedModels,
-      modelChats,
+      modelChats: normalizePersistedModelChats(modelChats),
       modelRoles,
       roleLibrary,
     };
@@ -993,6 +1115,8 @@ export default function Home() {
     setMessageQueue([]);
     setProcessingQueueId(null);
     setIsAllLoading(false);
+    setPendingInterruption("");
+    pendingInterruptionRef.current = "";
   }, []);
 
   const startNewChat = useCallback(() => {
@@ -1010,6 +1134,8 @@ export default function Home() {
     setMessageQueue([]);
     setProcessingQueueId(null);
     setIsAllLoading(false);
+    setPendingInterruption("");
+    pendingInterruptionRef.current = "";
     requestAnimationFrame(() => {
       textareaRef.current?.focus();
     });
@@ -1030,6 +1156,8 @@ export default function Home() {
       setMessageQueue([]);
       setProcessingQueueId(null);
       setIsAllLoading(false);
+      setPendingInterruption("");
+      pendingInterruptionRef.current = "";
       setIsChatHistoryOpen(false);
       setChatIdQuery(target.id, "push");
     },
@@ -1056,6 +1184,8 @@ export default function Home() {
         setMessageQueue([]);
         setProcessingQueueId(null);
         setIsAllLoading(false);
+        setPendingInterruption("");
+        pendingInterruptionRef.current = "";
         setChatIdQuery(nextSession.id, "replace");
         return;
       }
@@ -1072,6 +1202,8 @@ export default function Home() {
       setMessageQueue([]);
       setProcessingQueueId(null);
       setIsAllLoading(false);
+      setPendingInterruption("");
+      pendingInterruptionRef.current = "";
       clearChatIdQuery("replace");
     },
     [activeChatId, chatSessions, clearChatIdQuery, setChatIdQuery],
@@ -1312,8 +1444,20 @@ export default function Home() {
     interChatActiveRef.current = isInterModelChatActive;
   }, [isInterModelChatActive]);
 
+  useEffect(() => {
+    pendingInterruptionRef.current = pendingInterruption;
+  }, [pendingInterruption]);
+
   const removeModel = useCallback((modelKey: string) => {
-    setSelectedModels((prev) => prev.filter((m) => m !== modelKey));
+    setSelectedModels((prev) => {
+      const next = prev.filter((m) => m !== modelKey);
+      if (next.length === 0) {
+        setIsAllLoading(false);
+        setProcessingQueueId(null);
+        setIsInterModelSelected(false);
+      }
+      return next;
+    });
     setModelChats((prev) => {
       const updated = { ...prev };
       delete updated[modelKey];
@@ -1324,7 +1468,23 @@ export default function Home() {
       delete updated[modelKey];
       return updated;
     });
+    setMessageQueue((prev) =>
+      prev
+        .map((item) => ({
+          ...item,
+          selectedModels: item.selectedModels.filter((m) => m !== modelKey),
+        }))
+        .filter((item) => item.selectedModels.length > 0),
+    );
   }, []);
+
+  useEffect(() => {
+    if (!processingQueueId) return;
+    const exists = messageQueue.some((item) => item.id === processingQueueId);
+    if (!exists) {
+      setProcessingQueueId(null);
+    }
+  }, [processingQueueId, messageQueue]);
 
   const addModelInstance = useCallback(
     (modelRef: string) => {
@@ -1501,9 +1661,14 @@ export default function Home() {
         setModelChats((prev) => {
           const updated = { ...prev };
           targetModels.forEach((model) => {
+            const current = updated[model] || {
+              modelName: getBaseModelName(model),
+              messages: [],
+              isLoading: false,
+            };
             updated[model] = {
-              ...updated[model],
-              messages: [...updated[model].messages, { role: "user", content: userMessageForUi }],
+              ...current,
+              messages: [...current.messages, { role: "user", content: userMessageForUi }],
               isLoading: true,
             };
           });
@@ -1528,10 +1693,65 @@ export default function Home() {
               },
             ];
 
+            if (settings.enableMessageStreaming) {
+              setModelChats((prev) => {
+                const current = prev[model] || {
+                  modelName: getBaseModelName(model),
+                  messages: [],
+                  isLoading: true,
+                };
+                return {
+                  ...prev,
+                  [model]: {
+                    ...current,
+                    messages: [
+                      ...current.messages,
+                      { role: "assistant", content: "" },
+                    ],
+                    isLoading: true,
+                  },
+                };
+              });
+            }
+
             const rawAi = await generateWithOllama(
               hostUrl,
               getBaseModelName(model),
               ollamaMessages,
+              {
+                stream: settings.enableMessageStreaming,
+                onChunk: settings.enableMessageStreaming
+                  ? (accumulated) => {
+                      setModelChats((prev) => {
+                        const current = prev[model] || {
+                          modelName: getBaseModelName(model),
+                          messages: [],
+                          isLoading: true,
+                        };
+                        const messages = [...(current.messages || [])];
+                        if (
+                          messages.length > 0 &&
+                          messages[messages.length - 1].role === "assistant"
+                        ) {
+                          messages[messages.length - 1] = {
+                            ...messages[messages.length - 1],
+                            content: accumulated,
+                          };
+                        } else {
+                          messages.push({ role: "assistant", content: accumulated });
+                        }
+                        return {
+                          ...prev,
+                          [model]: {
+                            ...current,
+                            messages,
+                            isLoading: true,
+                          },
+                        };
+                      });
+                    }
+                  : undefined,
+              },
             );
             const ai = applyOutputLengthLimit(
               rawAi,
@@ -1543,14 +1763,37 @@ export default function Home() {
               }),
             );
 
-            setModelChats((prev) => ({
-              ...prev,
-              [model]: {
-                ...prev[model],
-                messages: [...prev[model].messages, { role: "assistant", content: ai }],
-                isLoading: false,
-              },
-            }));
+            setModelChats((prev) => {
+              const currentMessages: Message[] = [...(prev[model]?.messages || [])];
+              const nextMessages: Message[] = settings.enableMessageStreaming
+                ? (() => {
+                    if (
+                      currentMessages.length > 0 &&
+                      currentMessages[currentMessages.length - 1].role === "assistant"
+                    ) {
+                      currentMessages[currentMessages.length - 1] = {
+                        ...currentMessages[currentMessages.length - 1],
+                        content: ai,
+                      };
+                      return currentMessages;
+                    }
+                    return [...currentMessages, { role: "assistant", content: ai }];
+                  })()
+                : [...currentMessages, { role: "assistant", content: ai }];
+
+              return {
+                ...prev,
+                [model]: {
+                  ...(prev[model] || {
+                    modelName: getBaseModelName(model),
+                    messages: [],
+                    isLoading: false,
+                  }),
+                  messages: nextMessages,
+                  isLoading: false,
+                },
+              };
+            });
           } catch (error) {
             console.error(`[v0] Error with model ${model}:`, error);
             const hostId = getHostIdFromModelKey(model);
@@ -1558,20 +1801,38 @@ export default function Home() {
               setHostStatuses((prev) => ({ ...prev, [hostId]: "failed" }));
             }
             const detail = error instanceof Error ? error.message : "Unknown error";
-            setModelChats((prev) => ({
-              ...prev,
-              [model]: {
-                ...prev[model],
-                messages: [
-                  ...prev[model].messages,
-                  {
-                    role: "assistant",
-                    content: `Error: Could not get response from ${getBaseModelName(model)}. ${detail}`,
-                  },
-                ],
-                isLoading: false,
-              },
-            }));
+            setModelChats((prev) => {
+              const currentMessages: Message[] = [...(prev[model]?.messages || [])];
+              const errorText = `Error: Could not get response from ${getBaseModelName(model)}. ${detail}`;
+              const nextMessages: Message[] = settings.enableMessageStreaming
+                ? (() => {
+                    if (
+                      currentMessages.length > 0 &&
+                      currentMessages[currentMessages.length - 1].role === "assistant"
+                    ) {
+                      currentMessages[currentMessages.length - 1] = {
+                        ...currentMessages[currentMessages.length - 1],
+                        content: errorText,
+                      };
+                      return currentMessages;
+                    }
+                    return [...currentMessages, { role: "assistant", content: errorText }];
+                  })()
+                : [...currentMessages, { role: "assistant", content: errorText }];
+
+              return {
+                ...prev,
+                [model]: {
+                  ...(prev[model] || {
+                    modelName: getBaseModelName(model),
+                    messages: [],
+                    isLoading: false,
+                  }),
+                  messages: nextMessages,
+                  isLoading: false,
+                },
+              };
+            });
           }
         });
 
@@ -1598,6 +1859,7 @@ export default function Home() {
       settings.chatConfigMaxOutputLength,
       settings.chatConfigPostPrompt,
       settings.chatConfigPrePrompt,
+      settings.enableMessageStreaming,
       stripModelTags,
     ],
   );
@@ -1612,7 +1874,24 @@ export default function Home() {
   }, [stripModelTags]);
 
   const sendMessage = useCallback(() => {
-    if ((!userInput.trim() && attachments.length === 0) || selectedModels.length === 0)
+    const trimmedInput = userInput.trim();
+
+    if (isInterModelChatActive) {
+      if (!trimmedInput) return;
+      if (pendingInterruptionRef.current.trim()) {
+        toast.error("Only one interrupt can be queued at a time.");
+        return;
+      }
+      setPendingInterruption(trimmedInput);
+      setUserInput("");
+      setActiveMentionStart(null);
+      setActiveMentionEnd(null);
+      setActiveMentionQuery("");
+      toast.success("Interrupt queued. It will be applied on the next turn.");
+      return;
+    }
+
+    if ((!trimmedInput && attachments.length === 0) || selectedModels.length === 0)
       return;
     if (messageQueue.length >= MAX_QUEUED_MESSAGES) {
       toast.error(`Queue limit reached (${MAX_QUEUED_MESSAGES}).`);
@@ -1633,7 +1912,14 @@ export default function Home() {
     setActiveMentionEnd(null);
     setActiveMentionQuery("");
     setIsInterModelSelected(false);
-  }, [userInput, attachments, selectedModels, isInterModelSelected, messageQueue.length]);
+  }, [
+    userInput,
+    attachments,
+    selectedModels,
+    isInterModelSelected,
+    messageQueue.length,
+    isInterModelChatActive,
+  ]);
 
   const removeQueuedMessage = useCallback((id: string) => {
     if (processingQueueId === id) return;
@@ -1739,11 +2025,10 @@ export default function Home() {
     if (
       e.key === "Enter" &&
       !e.shiftKey &&
-      !isInterModelChatActive &&
-      !isQueueFull &&
       selectedModels.length > 0 &&
       (userInput.trim().length > 0 || attachments.length > 0)
     ) {
+      if (!isInterModelChatActive && isQueueFull) return;
       e.preventDefault();
       sendMessage();
     }
@@ -1830,30 +2115,84 @@ export default function Home() {
       modelsToUse.forEach((modelKey) => {
         localHistory[modelKey] = [...(modelChats[modelKey]?.messages || [])];
       });
+      const baseCountByModelRef: Record<string, number> = {};
+      modelsToUse.forEach((modelKey) => {
+        const baseRef = getBaseModelRef(modelKey);
+        baseCountByModelRef[baseRef] = (baseCountByModelRef[baseRef] || 0) + 1;
+      });
+      const seenByModelRef: Record<string, number> = {};
+      const speakerByModelKey: Record<string, string> = {};
+      modelsToUse.forEach((modelKey) => {
+        const baseRef = getBaseModelRef(modelKey);
+        seenByModelRef[baseRef] = (seenByModelRef[baseRef] || 0) + 1;
+        const instanceSuffix =
+          baseCountByModelRef[baseRef] > 1 ? `#${seenByModelRef[baseRef]}` : "";
+        const hostId = getHostIdFromModelKey(modelKey);
+        const hostLabel = (getHostUrlById(hostId) || hostId).replace(/^https?:\/\//, "");
+        speakerByModelKey[modelKey] = `${getBaseModelName(modelKey)}${instanceSuffix}@${hostLabel}`;
+      });
+      const participantList = modelsToUse
+        .map((modelKey) => speakerByModelKey[modelKey])
+        .filter(Boolean);
       const transcript: Array<{ speaker: string; content: string }> = [];
       const seedSpeaker = "User";
       transcript.push({ speaker: seedSpeaker, content: seed });
       while (interChatActiveRef.current) {
+        const interruptText = pendingInterruptionRef.current.trim();
+        if (interruptText) {
+          transcript.push({ speaker: "User", content: interruptText });
+          seed = interruptText;
+          modelsToUse.forEach((modelKey) => {
+            localHistory[modelKey] = [
+              ...localHistory[modelKey],
+              { role: "user", content: interruptText },
+            ];
+          });
+          setModelChats((prev) => {
+            const next = { ...prev };
+            modelsToUse.forEach((modelKey) => {
+              const current = next[modelKey] || {
+                modelName: getBaseModelName(modelKey),
+                messages: [],
+                isLoading: false,
+              };
+              next[modelKey] = {
+                ...current,
+                messages: [...current.messages, { role: "user", content: interruptText }],
+                isLoading: false,
+              };
+            });
+            return next;
+          });
+          pendingInterruptionRef.current = "";
+          setPendingInterruption("");
+        }
+
         const model = modelsToUse[currentIndex];
         setCurrentThinkingModel(model);
         try {
-          setModelChats((prev) => ({
-            ...prev,
-            [model]: {
-              ...prev[model],
-              isLoading: true,
-            },
-          }));
+          setModelChats((prev) => {
+            const current = prev[model] || {
+              modelName: getBaseModelName(model),
+              messages: [],
+              isLoading: false,
+            };
+            return {
+              ...prev,
+              [model]: {
+                ...current,
+                isLoading: true,
+              },
+            };
+          });
           const hostUrl = getHostUrlById(getHostIdFromModelKey(model));
           if (!hostUrl) throw new Error("Host URL not found for selected model.");
-          const hostId = getHostIdFromModelKey(model);
-          const hostLabel = (getHostUrlById(hostId) || hostId).replace(
-            /^https?:\/\//,
-            "",
-          );
-          const displayName = `${getBaseModelName(model)}@${hostLabel}`;
+          const displayName =
+            speakerByModelKey[model] || `${getBaseModelName(model)}@${getHostIdFromModelKey(model)}`;
           const latest = transcript[transcript.length - 1];
-          const interPrompt = `Inter-model conversation transcript:\n${transcript
+          const interPrompt = `Participants in this room:\n${participantList
+            .map((name, idx) => `${idx + 1}. ${name}`)
+            .join("\n")}\n\nInter-model conversation transcript:\n${transcript
             .map((t, idx) => `${idx + 1}. ${t.speaker}: ${t.content}`)
             .join("\n\n")}\n\nLatest speaker: ${latest.speaker}.\nRespond as ${displayName}, address the latest message, and continue the discussion.`;
           const systemMessage = buildSystemMessageForModel(model);
@@ -1865,10 +2204,66 @@ export default function Home() {
               content: buildPromptForModel(model, interPrompt),
             },
           ];
+
+          if (settings.enableMessageStreaming) {
+            setModelChats((prev) => {
+              const current = prev[model] || {
+                modelName: getBaseModelName(model),
+                messages: [],
+                isLoading: true,
+              };
+              return {
+                ...prev,
+                [model]: {
+                  ...current,
+                  messages: [
+                    ...current.messages,
+                    { role: "assistant", content: "" },
+                  ],
+                  isLoading: true,
+                },
+              };
+            });
+          }
+
           const rawAi = await generateWithOllama(
             hostUrl,
             getBaseModelName(model),
             ollamaMessages,
+            {
+              stream: settings.enableMessageStreaming,
+              onChunk: settings.enableMessageStreaming
+                ? (accumulated) => {
+                    setModelChats((prev) => {
+                      const current = prev[model] || {
+                        modelName: getBaseModelName(model),
+                        messages: [],
+                        isLoading: true,
+                      };
+                      const messages = [...current.messages];
+                      if (
+                        messages.length > 0 &&
+                        messages[messages.length - 1].role === "assistant"
+                      ) {
+                        messages[messages.length - 1] = {
+                          ...messages[messages.length - 1],
+                          content: accumulated,
+                        };
+                      } else {
+                        messages.push({ role: "assistant", content: accumulated });
+                      }
+                      return {
+                        ...prev,
+                        [model]: {
+                          ...current,
+                          messages,
+                          isLoading: true,
+                        },
+                      };
+                    });
+                  }
+                : undefined,
+            },
           );
           const ai = applyOutputLengthLimit(
             rawAi,
@@ -1886,17 +2281,37 @@ export default function Home() {
             { role: "user", content: interPrompt },
             { role: "assistant", content: ai },
           ];
-          setModelChats((prev) => ({
-            ...prev,
-            [model]: {
-              ...prev[model],
-              messages: [
-                ...prev[model].messages,
-                { role: "assistant", content: ai },
-              ],
+          setModelChats((prev) => {
+            const current = prev[model] || {
+              modelName: getBaseModelName(model),
+              messages: [],
               isLoading: false,
-            },
-          }));
+            };
+            const currentMessages: Message[] = [...current.messages];
+            const nextMessages: Message[] = settings.enableMessageStreaming
+              ? (() => {
+                  if (
+                    currentMessages.length > 0 &&
+                    currentMessages[currentMessages.length - 1].role === "assistant"
+                  ) {
+                    currentMessages[currentMessages.length - 1] = {
+                      ...currentMessages[currentMessages.length - 1],
+                      content: ai,
+                    };
+                    return currentMessages;
+                  }
+                  return [...currentMessages, { role: "assistant", content: ai }];
+                })()
+              : [...currentMessages, { role: "assistant", content: ai }];
+            return {
+              ...prev,
+              [model]: {
+                ...current,
+                messages: nextMessages,
+                isLoading: false,
+              },
+            };
+          });
         } catch (error) {
           const hostId = getHostIdFromModelKey(model);
           if (hostId) {
@@ -1904,20 +2319,38 @@ export default function Home() {
           }
           const detail =
             error instanceof Error ? error.message : "Unknown error";
-          setModelChats((prev) => ({
-            ...prev,
-            [model]: {
-              ...prev[model],
-              messages: [
-                ...prev[model].messages,
-                {
-                  role: "assistant",
-                  content: `Error: Could not get response from ${getBaseModelName(model)}. ${detail}`,
-                },
-              ],
+          setModelChats((prev) => {
+            const current = prev[model] || {
+              modelName: getBaseModelName(model),
+              messages: [],
               isLoading: false,
-            },
-          }));
+            };
+            const currentMessages: Message[] = [...current.messages];
+            const errorText = `Error: Could not get response from ${getBaseModelName(model)}. ${detail}`;
+            const nextMessages: Message[] = settings.enableMessageStreaming
+              ? (() => {
+                  if (
+                    currentMessages.length > 0 &&
+                    currentMessages[currentMessages.length - 1].role === "assistant"
+                  ) {
+                    currentMessages[currentMessages.length - 1] = {
+                      ...currentMessages[currentMessages.length - 1],
+                      content: errorText,
+                    };
+                    return currentMessages;
+                  }
+                  return [...currentMessages, { role: "assistant", content: errorText }];
+                })()
+              : [...currentMessages, { role: "assistant", content: errorText }];
+            return {
+              ...prev,
+              [model]: {
+                ...current,
+                messages: nextMessages,
+                isLoading: false,
+              },
+            };
+          });
         }
         currentIndex = (currentIndex + 1) % modelsToUse.length;
         await new Promise((r) => setTimeout(r, 400));
@@ -1936,6 +2369,7 @@ export default function Home() {
       convertUiMessagesToOllama,
       buildPromptForModel,
       modelChats,
+      getBaseModelRef,
       settings.chatConfigEnabled,
       settings.chatConfigPrePrompt,
       settings.chatConfigPostPrompt,
@@ -1946,6 +2380,8 @@ export default function Home() {
   const stopInterModelChat = useCallback(() => {
     setIsInterModelChatActive(false);
     interChatActiveRef.current = false;
+    pendingInterruptionRef.current = "";
+    setPendingInterruption("");
   }, []);
 
   useEffect(() => {
@@ -2274,6 +2710,7 @@ export default function Home() {
                 disableDuplicate={isInterModelChatActive}
                 onRemove={() => removeModel(modelKey)}
                 disableRemove={isInterModelChatActive}
+                enableMessageStreaming={settings.enableMessageStreaming}
               />
             </div>
           ))
@@ -2323,9 +2760,9 @@ export default function Home() {
       <div className="border-t border-border bg-background px-3 py-2 md:px-4 md:py-3">
         <div className="max-w-7xl mx-auto space-y-3">
           <div
-            className={`${selectedModels.length === 1 ? "max-w-none" : "max-w-2xl"} w-full mx-auto overflow-x-auto slim-scrollbar ${isInterModelChatActive ? "opacity-50 pointer-events-none" : ""}`}
+            className={`w-full mx-auto overflow-x-auto slim-scrollbar ${isInterModelChatActive ? "opacity-50 pointer-events-none" : ""}`}
           >
-            <div className="flex w-max min-w-full gap-1.5 md:w-full md:flex-wrap justify-start md:justify-center">
+            <div className="flex w-max min-w-full justify-center gap-1.5">
             {availableModels.map((model) => {
               const hostLabel = model.hostUrl.replace(/^https?:\/\//, "");
               const chipLabel = truncateMiddle(`${model.modelName}@${hostLabel}`, 22);
@@ -2531,11 +2968,14 @@ export default function Home() {
                       {selectedModels.length < 2
                         ? "Select at least 2 models for inter-model communication"
                         : isInterModelChatActive
-                          ? `Inter-model active. Click to stop. Thinking: ${
+                          ? `Inter-model running. Click to stop.${
                               currentThinkingModel
-                                ? modelDisplayNameByKey[currentThinkingModel] ||
-                                  getBaseModelName(currentThinkingModel)
-                                : "..."
+                                ? ` Thinking: ${truncateMiddle(
+                                    modelDisplayNameByKey[currentThinkingModel] ||
+                                      getBaseModelName(currentThinkingModel),
+                                    24,
+                                  )}`
+                                : ""
                             }`
                           : isInterModelSelected
                             ? "Inter-model: Selected (send to start)"
@@ -2555,9 +2995,13 @@ export default function Home() {
                 <div className="relative flex-1">
                 <Textarea
                   placeholder={
-                    isMobileViewport
-                      ? "Ask something..."
-                      : "Ask something... (use @model to target one or more selected models)"
+                    isInterModelChatActive
+                      ? isMobileViewport
+                        ? "Send interrupt message..."
+                        : "Send interrupt message to guide the ongoing inter-model conversation..."
+                      : isMobileViewport
+                        ? "Ask something..."
+                        : "Ask something... (use @model to target one or more selected models)"
                   }
                   value={userInput}
                   onChange={(e) => {
@@ -2618,8 +3062,9 @@ export default function Home() {
               <Button
                 onClick={sendMessage}
                 disabled={
-                  isInterModelChatActive ||
-                  isQueueFull ||
+                  (isInterModelChatActive &&
+                    (!userInput.trim() || !!pendingInterruption.trim())) ||
+                  (!isInterModelChatActive && isQueueFull) ||
                   selectedModels.length === 0 ||
                   (!userInput.trim() && attachments.length === 0)
                 }
@@ -2777,6 +3222,15 @@ export default function Home() {
             allowSameModelMultiChat: checked,
           }))
         }
+        onEnableMessageStreamingChange={(checked) =>
+          setSettings((prev) => {
+            if (isInterModelChatActive) return prev;
+            return {
+              ...prev,
+              enableMessageStreaming: checked,
+            };
+          })
+        }
         onChatConfigEnabledChange={(checked) =>
           setSettings((prev) => ({
             ...prev,
@@ -2807,6 +3261,7 @@ export default function Home() {
         isUpdatingPwa={isUpdatingPwa}
         onInstallPwa={installPwa}
         onUpdatePwa={updatePwa}
+        isInterModelChatActive={isInterModelChatActive}
       />
 
       <NetworkScanDialog
